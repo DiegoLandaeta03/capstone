@@ -11,7 +11,6 @@ class MixdApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(goRouterProvider);
-    final themeMode = ref.watch(themeModeProvider);
     final supabaseEnabled = ref.watch(supabaseEnabledProvider);
 
     return MaterialApp.router(
@@ -19,7 +18,7 @@ class MixdApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),
-      themeMode: themeMode,
+      themeMode: ThemeMode.system,
       routerConfig: router,
       builder: (context, child) {
         final content = child ?? const SizedBox.shrink();

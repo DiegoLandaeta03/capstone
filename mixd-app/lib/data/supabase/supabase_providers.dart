@@ -11,6 +11,3 @@ final supabaseClientProvider = Provider<SupabaseClient?>((ref) {
   if (!ref.watch(supabaseEnabledProvider)) return null;
   return Supabase.instance.client;
 });
-
-final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.system);
-
