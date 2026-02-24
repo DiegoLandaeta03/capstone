@@ -10,8 +10,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/',
         builder: (context, state) {
-          // TODO: replace with a real local MP3 path on your device/emulator.
-          const demoPath = '/path/to/local/demo.mp3';
+          const demoPath = '/Users/diegolandaeta/Documents/music/Ácido Pantera - Sonido Campechano  (Ft. Digital Charanga) [ ezmp3.cc ].mp3';
           return const WalkmanPlayerScreen(
             filePath: demoPath,
             title: 'Demo Mix',
