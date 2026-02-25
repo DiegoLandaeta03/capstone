@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 
 class WalkmanPlayerScreen extends StatefulWidget {
@@ -22,20 +23,28 @@ class WalkmanPlayerScreen extends StatefulWidget {
 class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
     with SingleTickerProviderStateMixin {
   late final AudioPlayer _player;
+  late final AnimationController _reelController;
+
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   bool _isPlaying = false;
 
-  late final AnimationController _reelController;
-
   @override
   void initState() {
     super.initState();
+
+    // Lock this screen to landscape so it feels like holding a walkman.
+    SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+
     _player = AudioPlayer();
     _reelController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 4),
+      duration: const Duration(seconds: 1), // fast enough to clearly spin
     );
+
     _init();
   }
 
@@ -53,6 +62,7 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
         if (!mounted) return;
         final playing = state.playing;
         setState(() => _isPlaying = playing);
+
         if (playing) {
           _reelController.repeat();
         } else {
@@ -69,6 +79,7 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
 
   @override
   void dispose() {
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     _reelController.dispose();
     _player.dispose();
     super.dispose();
@@ -99,196 +110,193 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
         .clamp(0, _duration.inMilliseconds <= 0 ? 0 : _duration.inMilliseconds)
         .toDouble();
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        foregroundColor: colorScheme.onPrimary,
-        title: const Text('Now Playing'),
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: Center(
-                  child: _WalkmanCard(
-                    title: widget.title,
-                    artist: widget.artist,
-                    controller: _reelController,
-                    isPlaying: _isPlaying,
-                  ),
+    final playButton = Semantics(
+      label: _isPlaying ? 'Pause mixtape' : 'Play mixtape',
+      button: true,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: _togglePlayPause,
+          customBorder: const CircleBorder(),
+          child: Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: colorScheme.primary.withOpacity(0.95),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.3),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
                 ),
-              ),
-              const SizedBox(height: 32),
-              SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  trackHeight: 4,
-                  thumbShape:
-                      const RoundSliderThumbShape(enabledThumbRadius: 8),
-                ),
-                child: Slider(
-                  min: 0.0,
-                  max: durationMs,
-                  value: positionMs,
-                  onChanged: (v) async {
-                    final newPos = Duration(milliseconds: v.toInt());
-                    await _player.seek(newPos);
-                  },
-                ),
-              ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    _format(_position),
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: Colors.white70,
-                    ),
-                  ),
-                  Text(
-                    _format(_duration),
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: Colors.white70,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Semantics(
-                    label: _isPlaying ? 'Pause mixtape' : 'Play mixtape',
-                    button: true,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: colorScheme.primary,
-                        foregroundColor: colorScheme.onPrimary,
-                        shape: const CircleBorder(),
-                        padding: const EdgeInsets.all(20),
-                      ),
-                      onPressed: _togglePlayPause,
-                      child: Icon(
-                        _isPlaying
-                            ? Icons.pause_rounded
-                            : Icons.play_arrow_rounded,
-                        size: 32,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-            ],
+              ],
+            ),
+            child: Icon(
+              _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+              size: 48,
+              color: colorScheme.onPrimary,
+            ),
           ),
+        ),
+      ),
+    );
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFE8E0C8),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: _FullScreenCassette(
+                title: widget.title,
+                controller: _reelController,
+                isPlaying: _isPlaying,
+                centerChild: playButton,
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: const BoxDecoration(
+                color: Color(0xFF263238),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(height: 8),
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      trackHeight: 3,
+                      thumbShape: const RoundSliderThumbShape(
+                        enabledThumbRadius: 6,
+                      ),
+                      activeTrackColor: colorScheme.primary,
+                      inactiveTrackColor: Colors.white24,
+                      thumbColor: colorScheme.primary,
+                    ),
+                    child: Slider(
+                      min: 0.0,
+                      max: durationMs,
+                      value: positionMs,
+                      onChanged: (v) async {
+                        final newPos = Duration(milliseconds: v.toInt());
+                        await _player.seek(newPos);
+                      },
+                    ),
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        _format(_position),
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: Colors.white70,
+                        ),
+                      ),
+                      Text(
+                        _format(_duration),
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-class _WalkmanCard extends StatelessWidget {
-  const _WalkmanCard({
+/// Full-screen cassette: the phone becomes the walkman. No wobble; reels spin only.
+class _FullScreenCassette extends StatelessWidget {
+  const _FullScreenCassette({
     required this.title,
-    required this.artist,
     required this.controller,
     required this.isPlaying,
+    required this.centerChild,
   });
 
   final String title;
-  final String artist;
   final AnimationController controller;
   final bool isPlaying;
+  final Widget centerChild;
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
 
-    return AspectRatio(
-      aspectRatio: 3 / 4,
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(24),
-          gradient: const LinearGradient(
-            colors: [
-              Color(0xFF222222),
-              Color(0xFF111111),
-            ],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
+    return Container(
+      margin: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEEE8D5),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF4A4A4A), width: 3),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black38,
+            blurRadius: 20,
+            offset: Offset(0, 8),
           ),
-          boxShadow: const [
-            BoxShadow(
-              color: Colors.black54,
-              blurRadius: 16,
-              offset: Offset(0, 12),
-            ),
-          ],
-          border: Border.all(color: Colors.white10, width: 1),
-        ),
-        padding: const EdgeInsets.all(20),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(13),
         child: Column(
           children: [
+            // Top: Mixtape label using title
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(16),
-                color: Colors.black.withOpacity(0.6),
+                color: Colors.white,
+                border: Border(
+                  bottom: BorderSide(color: Colors.black12, width: 1),
+                ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                        ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    artist,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Colors.white70,
-                        ),
-                  ),
+              child: Text(
+                "Deegs Mix",
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: Colors.black87,
+                  fontStyle: FontStyle.italic,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            // Colored stripes
+            SizedBox(
+              height: 20,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: const [
+                  Expanded(child: ColoredBox(color: Color(0xFFE57373))),
+                  Expanded(child: ColoredBox(color: Color(0xFFFFB74D))),
+                  Expanded(child: ColoredBox(color: Color(0xFF64B5F6))),
                 ],
               ),
             ),
-            const Spacer(),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _Reel(controller: controller),
-                _TapeStrip(isPlaying: isPlaying),
-                _Reel(controller: controller),
-              ],
-            ),
-            const Spacer(),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'MIXD WALKMAN',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: Colors.white54,
-                        letterSpacing: 2,
-                      ),
+            // Main area: reels + center play button (no wobble)
+            Expanded(
+              child: Container(
+                color: const Color(0xFFD5D0BC),
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Center(child: _Reel(controller: controller)),
+                    ),
+                    centerChild,
+                    Expanded(
+                      child: Center(child: _Reel(controller: controller)),
+                    ),
+                  ],
                 ),
-                Icon(
-                  Icons.graphic_eq_rounded,
-                  color: colorScheme.primary,
-                  size: 20,
-                ),
-              ],
+              ),
             ),
           ],
         ),
@@ -297,6 +305,7 @@ class _WalkmanCard extends StatelessWidget {
   }
 }
 
+/// Spinning reel/gear inside the cassette.
 class _Reel extends StatelessWidget {
   const _Reel({required this.controller});
 
@@ -307,47 +316,33 @@ class _Reel extends StatelessWidget {
     return RotationTransition(
       turns: Tween<double>(begin: 0, end: 1).animate(controller),
       child: Container(
-        width: 64,
-        height: 64,
+        width: 52,
+        height: 52,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: Colors.black,
-          border: Border.all(color: Colors.white30, width: 3),
+          color: const Color(0xFF263238),
+          border: Border.all(color: Colors.white70, width: 2),
         ),
-        child: Center(
-          child: Container(
-            width: 12,
-            height: 12,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white70,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            for (int i = 0; i < 4; i++)
+              Transform.rotate(
+                angle: i * (math.pi / 2),
+                child: Container(
+                  width: 32,
+                  height: 3,
+                  color: Colors.white38,
+                ),
+              ),
+            Container(
+              width: 12,
+              height: 12,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white,
+              ),
             ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _TapeStrip extends StatelessWidget {
-  const _TapeStrip({required this.isPlaying});
-
-  final bool isPlaying;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
-      width: isPlaying ? 80 : 60,
-      height: 8,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(4),
-        gradient: const LinearGradient(
-          colors: [
-            Color(0xFFB3E5FC),
-            Color(0xFF7C4DFF),
-            Color(0xFFFFC400),
           ],
         ),
       ),
@@ -355,3 +350,49 @@ class _TapeStrip extends StatelessWidget {
   }
 }
 
+/// Simple splash / watercolor background behind cassette.
+class _SplashPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..style = PaintingStyle.fill;
+
+    // Blue splash bottom-right
+    paint.color = const Color(0xFF64B5F6).withOpacity(0.35);
+    final path1 = Path()
+      ..moveTo(size.width * 0.65, size.height * 0.65)
+      ..quadraticBezierTo(
+        size.width * 0.9,
+        size.height * 0.6,
+        size.width * 0.8,
+        size.height * 0.9,
+      )
+      ..quadraticBezierTo(
+        size.width * 0.6,
+        size.height * 0.95,
+        size.width * 0.65,
+        size.height * 0.65,
+      );
+    canvas.drawPath(path1, paint);
+
+    // Orange splash top-left
+    paint.color = const Color(0xFFFFB74D).withOpacity(0.4);
+    final path2 = Path()
+      ..moveTo(size.width * 0.15, size.height * 0.15)
+      ..quadraticBezierTo(
+        size.width * 0.05,
+        size.height * 0.35,
+        size.width * 0.3,
+        size.height * 0.3,
+      )
+      ..quadraticBezierTo(
+        size.width * 0.25,
+        size.height * 0.1,
+        size.width * 0.15,
+        size.height * 0.15,
+      );
+    canvas.drawPath(path2, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
