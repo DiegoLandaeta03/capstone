@@ -1,0 +1,1 @@
+ /Users/diegolandaeta/Capstone/Mixd/mixd-app/.dart_tool/flutter_build/0e9a99ddb631409a0153165f0ac3ce66/native_assets.json:  /Users/diegolandaeta/Capstone/Mixd/mixd-app/.dart_tool/hooks_runner/shared/objective_c/build/9f22e6a04e/objective_c.dylib

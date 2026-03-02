@@ -106,7 +106,8 @@ class _LoginScreenState extends State<LoginScreen> {
                             onPressed: () async {
                               setState(() => _isLoading = true);
                               final success = await _authService.signInWithGoogle();
-                              if (!success && mounted) {
+                              if (!context.mounted) return;
+                              if (!success) {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text('Sign in failed. Please try again.'),
@@ -114,7 +115,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                   ),
                                 );
                               }
-                              if (mounted) setState(() => _isLoading = false);
+                              setState(() => _isLoading = false);
                             },
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.white,

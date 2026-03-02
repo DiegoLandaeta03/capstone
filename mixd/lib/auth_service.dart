@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -34,7 +34,6 @@ class AuthService {
         );
         
         final googleUser = await googleSignIn.authenticate();
-        if (googleUser == null) return false;
 
         final googleAuth = googleUser.authentication;
         final idToken = googleAuth.idToken;
@@ -48,7 +47,7 @@ class AuthService {
         return true;
       }
     } catch (e) {
-      print("Error in Google Sign-In: $e");
+      debugPrint("Error in Google Sign-In: $e");
       return false;
     }
   }
@@ -77,7 +76,7 @@ class AuthService {
       // Sign out from Supabase (Web and Mobile)
       await _supabase.auth.signOut();
     } catch (e) {
-      print("Error signing out: $e");
+      debugPrint("Error signing out: $e");
     }
   }
 
