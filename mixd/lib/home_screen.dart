@@ -332,8 +332,8 @@ class _UserMixesTab extends StatelessWidget {
   static const _tracks = <_MixTrack>[
     _MixTrack(
       title: 'Walkman Demo Mix',
-      artist: 'SoundHelix',
-      source: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
+      artist: 'Ácido Pantera',
+      source: 'assets/audio/sample.mp3',
     ),
   ];
 

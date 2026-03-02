@@ -53,9 +53,13 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
       widget.filePath.startsWith('http://') ||
       widget.filePath.startsWith('https://');
 
+  bool get _isAssetSource => widget.filePath.startsWith('assets/');
+
   Future<void> _init() async {
     try {
-      if (_isHttpSource) {
+      if (_isAssetSource) {
+        await _player.setAsset(widget.filePath);
+      } else if (_isHttpSource) {
         await _player.setUrl(widget.filePath);
       } else {
         await _player.setFilePath(widget.filePath);
@@ -155,63 +159,84 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
     return Scaffold(
       backgroundColor: const Color(0xFFE8E0C8),
       body: SafeArea(
-        child: Column(
+        child: Stack(
           children: [
-            Expanded(
-              child: _FullScreenCassette(
-                title: widget.title,
-                artist: widget.artist,
-                controller: _reelController,
-                centerChild: playButton,
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: const BoxDecoration(
-                color: Color(0xFF263238),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(height: 8),
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 3,
-                      thumbShape: const RoundSliderThumbShape(
-                        enabledThumbRadius: 6,
-                      ),
-                      activeTrackColor: colorScheme.primary,
-                      inactiveTrackColor: Colors.white24,
-                      thumbColor: colorScheme.primary,
-                    ),
-                    child: Slider(
-                      min: 0.0,
-                      max: durationMs,
-                      value: positionMs,
-                      onChanged: (v) async {
-                        final newPos = Duration(milliseconds: v.toInt());
-                        await _player.seek(newPos);
-                      },
-                    ),
+            Column(
+              children: [
+                Expanded(
+                  child: _FullScreenCassette(
+                    title: widget.title,
+                    artist: widget.artist,
+                    controller: _reelController,
+                    centerChild: playButton,
                   ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF263238),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(
-                        _format(_position),
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: Colors.white70,
+                      const SizedBox(height: 8),
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 3,
+                          thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 6,
+                          ),
+                          activeTrackColor: colorScheme.primary,
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: colorScheme.primary,
+                        ),
+                        child: Slider(
+                          min: 0.0,
+                          max: durationMs,
+                          value: positionMs,
+                          onChanged: (v) async {
+                            final newPos = Duration(milliseconds: v.toInt());
+                            await _player.seek(newPos);
+                          },
                         ),
                       ),
-                      Text(
-                        _format(_duration),
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: Colors.white70,
-                        ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            _format(_position),
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: Colors.white70,
+                            ),
+                          ),
+                          Text(
+                            _format(_duration),
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: Colors.white70,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                ],
+                ),
+              ],
+            ),
+            Positioned(
+              top: 8,
+              left: 8,
+              child: Material(
+                color: Colors.black.withValues(alpha: 0.25),
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: () => Navigator.of(context).maybePop(),
+                  child: const Padding(
+                    padding: EdgeInsets.all(10),
+                    child: Icon(Icons.close_rounded, color: Colors.white),
+                  ),
+                ),
               ),
             ),
           ],
