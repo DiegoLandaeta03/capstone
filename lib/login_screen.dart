@@ -140,9 +140,10 @@ class _LoginScreenState extends State<LoginScreen> {
                             final success = await _authService.signInWithGoogle();
                             if (!context.mounted) return;
                             if (!success) {
+                              final errorText = _authService.lastSignInError ?? 'Unknown sign-in error.';
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Sign in failed. Please try again.'),
+                                SnackBar(
+                                  content: Text('Sign in failed: $errorText'),
                                   backgroundColor: Colors.redAccent,
                                 ),
                               );

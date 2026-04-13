@@ -18,11 +18,37 @@ class _MixesScreenState extends State<MixesScreen> {
   String? _errorMessage;
   List<Map<String, dynamic>> _myMixes = const [];
   List<Map<String, dynamic>> _sharedMixes = const [];
+  Map<String, String> _creatorNameById = const {};
 
   @override
   void initState() {
     super.initState();
     _loadMixes();
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchSharedMixesForUser(String userId) async {
+    // Try Postgres array contains syntax first (works for uuid[] and text[]).
+    try {
+      final rows = await _supabase
+          .from('mixtapes')
+          .select()
+          .filter('shared_users', 'cs', '{$userId}')
+          .neq('creator_id', userId)
+          .order('created_at', ascending: false);
+      return (rows as List<dynamic>).cast<Map<String, dynamic>>();
+    } catch (_) {}
+
+    // Fallback for jsonb arrays.
+    try {
+      final rows = await _supabase
+          .from('mixtapes')
+          .select()
+          .contains('shared_users', [userId]).neq('creator_id', userId)
+          .order('created_at', ascending: false);
+      return (rows as List<dynamic>).cast<Map<String, dynamic>>();
+    } catch (_) {}
+
+    return const <Map<String, dynamic>>[];
   }
 
   Future<void> _loadMixes() async {
@@ -47,22 +73,42 @@ class _MixesScreenState extends State<MixesScreen> {
           .eq('creator_id', user.id)
           .order('created_at', ascending: false);
 
-      final sharedMixesFuture = _supabase
-          .from('mixtapes')
-          .select()
-          .contains('shared_users', [user.id]).neq('creator_id', user.id)
-          .order('created_at', ascending: false);
+      final sharedMixesFuture = _fetchSharedMixesForUser(user.id);
 
       final results = await Future.wait([myMixesFuture, sharedMixesFuture]);
       final myMixes = (results[0] as List<dynamic>)
           .cast<Map<String, dynamic>>();
       final sharedMixes = (results[1] as List<dynamic>)
           .cast<Map<String, dynamic>>();
+      final creatorIds = sharedMixes
+          .map((m) => m['creator_id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList(growable: false);
+      final creatorNameById = <String, String>{};
+
+      if (creatorIds.isNotEmpty) {
+        try {
+          final rows = await _supabase
+              .from('profiles')
+              .select('id, username')
+              .inFilter('id', creatorIds);
+          for (final row in (rows as List<dynamic>).cast<Map<String, dynamic>>()) {
+            final id = row['id']?.toString() ?? '';
+            if (id.isEmpty) continue;
+            final username = (row['username'] ?? '').toString().trim();
+            if (username.isNotEmpty) {
+              creatorNameById[id] = username;
+            }
+          }
+        } catch (_) {}
+      }
 
       if (!mounted) return;
       setState(() {
         _myMixes = myMixes;
         _sharedMixes = sharedMixes;
+        _creatorNameById = creatorNameById;
         _isLoading = false;
       });
     } catch (_) {
@@ -201,6 +247,7 @@ class _MixesScreenState extends State<MixesScreen> {
   Widget _buildMixCard(
     Map<String, dynamic> mix, {
     bool canDelete = false,
+    String? sharedByLabel,
   }) {
     final title = (mix['title'] as String?)?.trim();
     final description = (mix['description'] as String?)?.trim();
@@ -255,23 +302,35 @@ class _MixesScreenState extends State<MixesScreen> {
               ),
             ),
             const SizedBox(height: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: isPublic
-                    ? Colors.greenAccent.withAlpha(30)
-                    : Colors.white12,
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Text(
-                isPublic ? 'Public' : 'Private',
+            if (sharedByLabel != null)
+              Text(
+                'Shared by $sharedByLabel',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: GoogleFonts.outfit(
-                  color: isPublic ? Colors.greenAccent : Colors.white70,
-                  fontSize: 10,
+                  color: Colors.blueAccent,
+                  fontSize: 11,
                   fontWeight: FontWeight.w600,
                 ),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: isPublic
+                      ? Colors.greenAccent.withAlpha(30)
+                      : Colors.white12,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  isPublic ? 'Public' : 'Private',
+                  style: GoogleFonts.outfit(
+                    color: isPublic ? Colors.greenAccent : Colors.white70,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
-            ),
           ],
         ),
         trailing: canDelete
@@ -316,6 +375,7 @@ class _MixesScreenState extends State<MixesScreen> {
     required List<Map<String, dynamic>> mixes,
     required String emptyMessage,
     bool canDelete = false,
+    bool showSharedBy = false,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -347,7 +407,15 @@ class _MixesScreenState extends State<MixesScreen> {
             ),
           )
         else
-          ...mixes.map((mix) => _buildMixCard(mix, canDelete: canDelete)),
+          ...mixes.map((mix) {
+            final creatorId = mix['creator_id']?.toString() ?? '';
+            final sharedBy = showSharedBy ? _creatorNameById[creatorId] : null;
+            return _buildMixCard(
+              mix,
+              canDelete: canDelete,
+              sharedByLabel: sharedBy,
+            );
+          }),
       ],
     );
   }
@@ -409,6 +477,7 @@ class _MixesScreenState extends State<MixesScreen> {
               title: 'Shared with you',
               mixes: _sharedMixes,
               emptyMessage: 'No shared mixes yet.',
+              showSharedBy: true,
             ),
           ],
         ),

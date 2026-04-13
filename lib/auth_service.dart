@@ -5,16 +5,19 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 class AuthService {
   final SupabaseClient _supabase = Supabase.instance.client;
+  String? _lastSignInError;
 
   // Stream to listen to auth state changes
   Stream<AuthState> get authStateChanges => _supabase.auth.onAuthStateChange;
 
   // Get current user
   User? get currentUser => _supabase.auth.currentUser;
+  String? get lastSignInError => _lastSignInError;
 
   // Sign in with Google
   Future<bool> signInWithGoogle() async {
     try {
+      _lastSignInError = null;
       if (kIsWeb) {
         // WEB FLOW: Use Supabase's built-in OAuth redirect
         await _supabase.auth.signInWithOAuth(
@@ -51,6 +54,7 @@ class AuthService {
         return true;
       }
     } catch (e) {
+      _lastSignInError = e.toString();
       debugPrint("Error in Google Sign-In: $e");
       return false;
     }
