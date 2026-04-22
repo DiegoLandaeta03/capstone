@@ -19,6 +19,7 @@ class _MixesScreenState extends State<MixesScreen> {
   List<Map<String, dynamic>> _myMixes = const [];
   List<Map<String, dynamic>> _sharedMixes = const [];
   Map<String, String> _creatorNameById = const {};
+  bool _sharing = false;
 
   @override
   void initState() {
@@ -244,6 +245,194 @@ class _MixesScreenState extends State<MixesScreen> {
     }
   }
 
+  Future<List<Map<String, dynamic>>> _loadUsers() async {
+    try {
+      final rows = await _supabase.from('Profiles').select('*').order('updated_at');
+      return (rows as List).cast<Map<String, dynamic>>();
+    } catch (_) {
+      final rows = await _supabase.from('profiles').select('*').order('updated_at');
+      return (rows as List).cast<Map<String, dynamic>>();
+    }
+  }
+
+  String _displayName(Map<String, dynamic> row) {
+    final metadata = row['user_metadata'];
+    if (metadata is Map<String, dynamic>) {
+      final fullName = metadata['full_name']?.toString().trim();
+      if (fullName != null && fullName.isNotEmpty) return fullName;
+      final name = metadata['name']?.toString().trim();
+      if (name != null && name.isNotEmpty) return name;
+    }
+
+    final email = row['email']?.toString().trim();
+    if (email != null && email.isNotEmpty) return email.split('@').first;
+
+    final username = row['username']?.toString() ?? 'Unknown user';
+    return username;
+  }
+
+  String? _avatarUrl(Map<String, dynamic> row) {
+    final direct = row['avatar_url']?.toString().trim();
+    if (direct != null && direct.isNotEmpty) return direct;
+    final metadata = row['user_metadata'];
+    if (metadata is Map<String, dynamic>) {
+      final fromMeta = metadata['avatar_url']?.toString().trim();
+      if (fromMeta != null && fromMeta.isNotEmpty) return fromMeta;
+      final picture = metadata['picture']?.toString().trim();
+      if (picture != null && picture.isNotEmpty) return picture;
+    }
+    return null;
+  }
+
+  Widget _friendAvatar(Map<String, dynamic> row) {
+    final avatarUrl = _avatarUrl(row);
+    if (avatarUrl == null || avatarUrl.isEmpty) {
+      return CircleAvatar(
+        backgroundColor: Colors.blueAccent.withAlpha(128),
+        child: const Icon(Icons.person, color: Colors.white),
+      );
+    }
+    return CircleAvatar(
+      backgroundColor: Colors.blueAccent.withAlpha(90),
+      backgroundImage: NetworkImage(avatarUrl),
+      onBackgroundImageError: (_, __) {},
+      child: const SizedBox.shrink(),
+    );
+  }
+
+  Future<void> _appendSharedUserToMixtape({
+    required String mixtapeId,
+    required String receiverId,
+  }) async {
+    final rows = (await _supabase
+        .from('mixtapes')
+        .select('shared_users')
+        .eq('id', mixtapeId)
+        .limit(1)) as List<dynamic>;
+
+    if (rows.isEmpty) return;
+    final row = rows.first as Map<String, dynamic>;
+
+    final existingRaw = row['shared_users'];
+    final existing = <String>{};
+    if (existingRaw is List) {
+      for (final value in existingRaw) {
+        final id = value?.toString() ?? '';
+        if (id.isNotEmpty) existing.add(id);
+      }
+    }
+
+    if (existing.contains(receiverId)) return;
+    existing.add(receiverId);
+
+    await _supabase
+        .from('mixtapes')
+        .update({'shared_users': existing.toList()}).eq('id', mixtapeId);
+  }
+
+  Future<void> _shareMix(Map<String, dynamic> mix) async {
+    if (_sharing) return;
+
+    final myId = _supabase.auth.currentUser?.id;
+    if (myId == null || myId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Sign in to share mixes.', style: GoogleFonts.outfit())),
+      );
+      return;
+    }
+
+    final mixId = mix['id']?.toString() ?? '';
+    if (mixId.isEmpty) return;
+
+    setState(() => _sharing = true);
+    try {
+      final users = await _loadUsers();
+      if (!mounted) return;
+
+      final visibleUsers = users.where((u) => u['id']?.toString() != myId).toList();
+      if (visibleUsers.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No friends found to share with.', style: GoogleFonts.outfit())),
+        );
+        return;
+      }
+
+      final chosen = await showModalBottomSheet<Map<String, dynamic>>(
+        context: context,
+        backgroundColor: const Color(0xFF16213E),
+        isScrollControlled: true,
+        builder: (context) {
+          return SafeArea(
+            child: SizedBox(
+              height: MediaQuery.of(context).size.height * 0.65,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                    child: Text(
+                      'Share mix with…',
+                      style: GoogleFonts.outfit(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 18,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: visibleUsers.length,
+                      itemBuilder: (context, index) {
+                        final row = visibleUsers[index];
+                        final receiverId = row['id']?.toString() ?? '';
+                        final receiverName = _displayName(row);
+                        return ListTile(
+                          enabled: receiverId.isNotEmpty,
+                          leading: _friendAvatar(row),
+                          title: Text(
+                            receiverName,
+                            style: GoogleFonts.outfit(color: Colors.white),
+                          ),
+                          trailing: const Icon(Icons.chevron_right, color: Colors.white38),
+                          onTap: receiverId.isEmpty ? null : () => Navigator.of(context).pop(row),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+
+      if (chosen == null) return;
+      final receiverId = chosen['id']?.toString() ?? '';
+      final receiverName = _displayName(chosen);
+      if (receiverId.isEmpty) return;
+
+      await _supabase.from('messages').insert({
+        'sender_id': myId,
+        'receiver_id': receiverId,
+        'content': 'mix{$mixId}',
+      });
+      await _appendSharedUserToMixtape(mixtapeId: mixId, receiverId: receiverId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Shared with $receiverName', style: GoogleFonts.outfit()),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not share mix right now.', style: GoogleFonts.outfit())),
+      );
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
   Widget _buildMixCard(
     Map<String, dynamic> mix, {
     bool canDelete = false,
@@ -334,10 +523,20 @@ class _MixesScreenState extends State<MixesScreen> {
           ],
         ),
         trailing: canDelete
-            ? IconButton(
-                icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
-                tooltip: 'Delete mixtape',
-                onPressed: () => _confirmAndDeleteMix(mix),
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.share_outlined, color: Colors.white70),
+                    tooltip: 'Share mixtape',
+                    onPressed: _sharing ? null : () => _shareMix(mix),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
+                    tooltip: 'Delete mixtape',
+                    onPressed: () => _confirmAndDeleteMix(mix),
+                  ),
+                ],
               )
             : const Icon(Icons.chevron_right_rounded, color: Colors.white54),
         onTap: () {

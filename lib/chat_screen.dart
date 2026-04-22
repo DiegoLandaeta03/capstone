@@ -136,8 +136,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       setState(() => _error = e.toString());
     } finally {
-      if (!mounted) return;
-      setState(() => _sending = false);
+      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -145,15 +144,14 @@ class _ChatScreenState extends State<ChatScreen> {
     required String mixtapeId,
     required String receiverId,
   }) async {
-    final rows = await _supabase
+    final rows = (await _supabase
         .from('mixtapes')
         .select('shared_users')
         .eq('id', mixtapeId)
-        .limit(1);
+        .limit(1)) as List<dynamic>;
 
-    if (rows is! List || rows.isEmpty) return;
-    final row = rows.first;
-    if (row is! Map<String, dynamic>) return;
+    if (rows.isEmpty) return;
+    final row = rows.first as Map<String, dynamic>;
 
     final existingRaw = row['shared_users'];
     final existing = <String>{};
