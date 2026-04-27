@@ -2,7 +2,10 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'models/mixtape_payload.dart';
+import 'services/mixtape_playback_builder.dart';
+import 'services/signed_audio_url_service.dart';
 
 class WalkmanMixTrack {
   const WalkmanMixTrack({
@@ -12,6 +15,7 @@ class WalkmanMixTrack {
     this.title,
     this.artist,
     this.coverArtUrl,
+    this.transitionToNext = const ClipTransition.hardCut(),
   });
 
   final String fileKey;
@@ -20,6 +24,7 @@ class WalkmanMixTrack {
   final String? title;
   final String? artist;
   final String? coverArtUrl;
+  final ClipTransition transitionToNext;
 }
 
 class WalkmanPlayerScreen extends StatefulWidget {
@@ -43,7 +48,10 @@ class WalkmanPlayerScreen extends StatefulWidget {
 
 class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
     with SingleTickerProviderStateMixin {
-  final SupabaseClient _supabase = Supabase.instance.client;
+  final SignedAudioUrlService _signedAudioUrlService = SignedAudioUrlService();
+  final MixtapePlaybackBuilder _playbackBuilder = MixtapePlaybackBuilder(
+    enableOverlapCrossfade: false,
+  );
   late final AudioPlayer _player;
   late final AudioPlayer _previewPlayer;
   late final AnimationController _reelController;
@@ -56,6 +64,8 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
   int _currentIndexPlaying = 0;
   bool _isPlaying = false;
   int? _previewPlayingIndex;
+  MixtapePlaybackPlan? _playbackPlan;
+  List<ClipTransition> _appliedTransitions = const [];
 
   @override
   void initState() {
@@ -114,20 +124,40 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
 
   Future<void> _setMixAudioSource() async {
     final tracks = widget.mixTracks ?? const <WalkmanMixTrack>[];
+    final clips = <MixtapeClip>[];
+    for (int i = 0; i < tracks.length; i++) {
+      final t = tracks[i];
+      clips.add(
+        MixtapeClip(
+          position: i,
+          songId: t.fileKey,
+          title: (t.title ?? '').trim().isEmpty ? 'Track ${i + 1}' : t.title!,
+          artist: t.artist ?? '',
+          albumArtUrl: t.coverArtUrl,
+          fileKey: t.fileKey,
+          startSeconds: t.startSeconds,
+          endSeconds: t.endSeconds,
+          originalDurationSeconds: (t.endSeconds > 0 ? t.endSeconds.ceil() : 1),
+          trimmedDurationSeconds: t.endSeconds - t.startSeconds,
+          transitionToNext: t.transitionToNext,
+        ),
+      );
+    }
+    final plan = _playbackBuilder.build(clips);
     final sources = <AudioSource>[];
     final trackDurations = <Duration>[];
 
-    for (final track in tracks) {
-      final objectPath = track.fileKey.endsWith('.mp3')
-          ? track.fileKey
-          : '${track.fileKey}.mp3';
-      final signedUrl = await _supabase.storage
-          .from('song-files')
-          .createSignedUrl(objectPath, const Duration(minutes: 5).inSeconds);
-      final startMs =
-          (track.startSeconds * 1000).round().clamp(0, 36000000).toInt();
-      final endMs =
-          (track.endSeconds * 1000).round().clamp(0, 36000000).toInt();
+    final appliedTransitions = <ClipTransition>[];
+    for (final clip in plan.clips) {
+      final signedUrl = await _signedAudioUrlService.signedSongUrl(
+        clip.fileKey,
+      );
+      if (signedUrl == null) continue;
+      final startMs = (clip.startSeconds * 1000)
+          .round()
+          .clamp(0, 36000000)
+          .toInt();
+      final endMs = (clip.endSeconds * 1000).round().clamp(0, 36000000).toInt();
       final boundedEndMs = endMs <= startMs ? startMs + 1 : endMs;
       trackDurations.add(Duration(milliseconds: boundedEndMs - startMs));
 
@@ -138,6 +168,7 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
           child: AudioSource.uri(Uri.parse(signedUrl)),
         ),
       );
+      appliedTransitions.add(clip.transitionToNext);
     }
 
     if (sources.isEmpty) {
@@ -145,22 +176,15 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
     }
 
     _mixTrackDurations = trackDurations;
-    _mixTotalDuration = trackDurations.fold(
-      Duration.zero,
-      (sum, d) => sum + d,
-    );
+    _mixTotalDuration = trackDurations.fold(Duration.zero, (sum, d) => sum + d);
 
-    await _player.setAudioSource(
-      ConcatenatingAudioSource(children: sources),
-    );
+    await _player.setAudioSource(ConcatenatingAudioSource(children: sources));
+    _playbackPlan = plan;
+    _appliedTransitions = appliedTransitions;
   }
 
   Future<String> _signedUrlForFileKey(String fileKey) async {
-    final objectPath =
-        fileKey.endsWith('.mp3') ? fileKey : '${fileKey}.mp3';
-    return _supabase.storage
-        .from('song-files')
-        .createSignedUrl(objectPath, const Duration(minutes: 5).inSeconds);
+    return (await _signedAudioUrlService.signedSongUrl(fileKey)) ?? '';
   }
 
   Future<void> _init() async {
@@ -179,6 +203,7 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
 
       _player.positionStream.listen((pos) {
         if (!mounted) return;
+        _applyFadeVolumeForPosition(pos);
         if (_hasMixTracks) {
           final localMs = pos.inMilliseconds;
           final offsetMs = _mixOffsetUntil(_currentIndexPlaying).inMilliseconds;
@@ -231,10 +256,51 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
       });
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error loading audio: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error loading audio: $e')));
     }
+  }
+
+  void _applyFadeVolumeForPosition(Duration pos) {
+    if (_currentIndexPlaying < 0 ||
+        _currentIndexPlaying >= _appliedTransitions.length) {
+      _player.setVolume(1.0);
+      return;
+    }
+    final transition = _appliedTransitions[_currentIndexPlaying];
+    if (transition.type != TransitionType.fade) {
+      _player.setVolume(1.0);
+      return;
+    }
+
+    final currentTrackLen = (_currentIndexPlaying < _mixTrackDurations.length)
+        ? _mixTrackDurations[_currentIndexPlaying].inMilliseconds / 1000.0
+        : 0.0;
+    if (currentTrackLen <= 0) {
+      _player.setVolume(1.0);
+      return;
+    }
+    final localSec = pos.inMilliseconds / 1000.0;
+
+    var volume = 1.0;
+    final fadeOut = transition.fadeOutSeconds;
+    if (fadeOut > 0) {
+      final fadeOutStart = (currentTrackLen - fadeOut).clamp(
+        0.0,
+        currentTrackLen,
+      );
+      if (localSec >= fadeOutStart) {
+        final t = ((localSec - fadeOutStart) / fadeOut).clamp(0.0, 1.0);
+        volume = 1.0 - t;
+      }
+    }
+    final fadeIn = transition.fadeInSeconds;
+    if (fadeIn > 0 && localSec <= fadeIn) {
+      final t = (localSec / fadeIn).clamp(0.0, 1.0);
+      volume = volume < t ? volume : t;
+    }
+    _player.setVolume(volume.clamp(0.0, 1.0));
   }
 
   @override
@@ -283,6 +349,7 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
       });
 
       final signedUrl = await _signedUrlForFileKey(track.fileKey);
+      if (signedUrl.isEmpty) throw Exception('Missing signed URL');
       await _previewPlayer.setAudioSource(
         ClippingAudioSource(
           start: Duration.zero,
@@ -297,9 +364,9 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
       setState(() {
         _previewPlayingIndex = null;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not play preview.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Could not play preview.')));
     }
   }
 
@@ -335,7 +402,8 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
                   children: [
                     Text(
                       'Tracklist',
-                      style: Theme.of(sheetContext).textTheme.titleMedium?.copyWith(
+                      style: Theme.of(sheetContext).textTheme.titleMedium
+                          ?.copyWith(
                             color: Colors.white,
                             fontWeight: FontWeight.w700,
                           ),
@@ -343,9 +411,9 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
                     const Spacer(),
                     Text(
                       '${tracks.length} tracks',
-                      style: Theme.of(sheetContext).textTheme.labelMedium?.copyWith(
-                            color: Colors.white60,
-                          ),
+                      style: Theme.of(
+                        sheetContext,
+                      ).textTheme.labelMedium?.copyWith(color: Colors.white60),
                     ),
                   ],
                 ),
@@ -354,10 +422,8 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
                   child: ListView.separated(
                     shrinkWrap: true,
                     itemCount: tracks.length,
-                    separatorBuilder: (_, __) => const Divider(
-                      height: 1,
-                      color: Colors.white10,
-                    ),
+                    separatorBuilder: (_, __) =>
+                        const Divider(height: 1, color: Colors.white10),
                     itemBuilder: (context, index) {
                       final t = tracks[index];
                       final localTitle = (t.title ?? '').trim().isEmpty
@@ -369,16 +435,25 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
 
                       return ListTile(
                         dense: true,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 0),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 0,
+                        ),
                         leading: ClipRRect(
                           borderRadius: BorderRadius.circular(8),
                           child: SizedBox(
                             width: 38,
                             height: 38,
-                            child: t.coverArtUrl != null && t.coverArtUrl!.isNotEmpty
-                                ? Image.network(t.coverArtUrl!, fit: BoxFit.cover)
+                            child:
+                                t.coverArtUrl != null &&
+                                    t.coverArtUrl!.isNotEmpty
+                                ? Image.network(
+                                    t.coverArtUrl!,
+                                    fit: BoxFit.cover,
+                                  )
                                 : Container(
-                                    color: Colors.blueAccent.withValues(alpha: 0.2),
+                                    color: Colors.blueAccent.withValues(
+                                      alpha: 0.2,
+                                    ),
                                     child: const Icon(
                                       Icons.music_note_rounded,
                                       color: Colors.white70,
@@ -395,7 +470,9 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
                           ),
                         ),
                         subtitle: Text(
-                          localArtist.isEmpty ? rangeText : '$localArtist · $rangeText',
+                          localArtist.isEmpty
+                              ? rangeText
+                              : '$localArtist · $rangeText',
                           style: const TextStyle(color: Colors.white60),
                         ),
                         trailing: StreamBuilder<PlayerState>(
@@ -403,7 +480,8 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
                           builder: (context, snapshot) {
                             final isPreviewPlaying =
                                 _previewPlayingIndex == index &&
-                                    (snapshot.data?.playing ?? _previewPlayer.playing);
+                                (snapshot.data?.playing ??
+                                    _previewPlayer.playing);
                             return IconButton(
                               icon: Icon(
                                 isPreviewPlaying
@@ -418,9 +496,7 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
                           },
                         ),
                         onTap: () async {
-                          await _seekInMix(
-                            _mixOffsetUntil(index),
-                          );
+                          await _seekInMix(_mixOffsetUntil(index));
                           if (!sheetContext.mounted) return;
                           Navigator.of(sheetContext).pop();
                         },
@@ -497,7 +573,10 @@ class _WalkmanPlayerScreenState extends State<WalkmanPlayerScreen>
                 children: [
                   IconButton(
                     onPressed: () => Navigator.of(context).maybePop(),
-                    icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+                    icon: const Icon(
+                      Icons.arrow_back_rounded,
+                      color: Colors.white,
+                    ),
                   ),
                   Expanded(
                     child: Text(
@@ -634,11 +713,7 @@ class _FullScreenCassette extends StatelessWidget {
         gradient: const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [
-            Color(0xFF1E2B4A),
-            Color(0xFF18223D),
-            Color(0xFF121A31),
-          ],
+          colors: [Color(0xFF1E2B4A), Color(0xFF18223D), Color(0xFF121A31)],
         ),
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: Colors.white12, width: 1.4),
@@ -660,7 +735,10 @@ class _FullScreenCassette extends StatelessWidget {
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.18),
                 border: Border(
-                  bottom: BorderSide(color: Colors.white.withValues(alpha: 0.08), width: 1),
+                  bottom: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.08),
+                    width: 1,
+                  ),
                 ),
               ),
               child: Column(
@@ -708,11 +786,19 @@ class _FullScreenCassette extends StatelessWidget {
                 child: Row(
                   children: const [
                     SizedBox(width: 14),
-                    Expanded(child: Divider(color: Colors.white24, thickness: 0.8)),
+                    Expanded(
+                      child: Divider(color: Colors.white24, thickness: 0.8),
+                    ),
                     SizedBox(width: 10),
-                    Icon(Icons.graphic_eq_rounded, size: 14, color: Colors.white70),
+                    Icon(
+                      Icons.graphic_eq_rounded,
+                      size: 14,
+                      color: Colors.white70,
+                    ),
                     SizedBox(width: 10),
-                    Expanded(child: Divider(color: Colors.white24, thickness: 0.8)),
+                    Expanded(
+                      child: Divider(color: Colors.white24, thickness: 0.8),
+                    ),
                     SizedBox(width: 14),
                   ],
                 ),
@@ -721,8 +807,10 @@ class _FullScreenCassette extends StatelessWidget {
             Expanded(
               child: Container(
                 color: Colors.transparent,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 20,
+                ),
                 child: Row(
                   children: [
                     Expanded(
@@ -773,11 +861,7 @@ class _Reel extends StatelessWidget {
             for (int i = 0; i < 4; i++)
               Transform.rotate(
                 angle: i * (math.pi / 2),
-                child: Container(
-                  width: 32,
-                  height: 3,
-                  color: Colors.white30,
-                ),
+                child: Container(width: 32, height: 3, color: Colors.white30),
               ),
             Container(
               width: 12,
@@ -793,4 +877,3 @@ class _Reel extends StatelessWidget {
     );
   }
 }
-

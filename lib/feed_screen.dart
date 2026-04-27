@@ -6,6 +6,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'explore_screen.dart';
+import 'models/mixtape_payload.dart';
 import 'walkman_player_screen.dart';
 
 /// Virtual pages = `mixtapes.length * _kForYouLoopFactor` so the feed loops forever.
@@ -56,13 +57,14 @@ class _FeedScreenState extends State<FeedScreen> {
     });
 
     try {
-      final mixes = (await _supabase
-              .from('mixtapes')
-              .select()
-              .eq('is_public', true)
-              .order('created_at', ascending: false)
-              .limit(50))
-          .cast<Map<String, dynamic>>();
+      final mixes =
+          (await _supabase
+                  .from('mixtapes')
+                  .select()
+                  .eq('is_public', true)
+                  .order('created_at', ascending: false)
+                  .limit(50))
+              .cast<Map<String, dynamic>>();
 
       final forYou = List<Map<String, dynamic>>.from(mixes);
       forYou.shuffle(Random());
@@ -160,7 +162,10 @@ class _FeedScreenState extends State<FeedScreen> {
     }
   }
 
-  Future<void> _loadSocialForMixtape(String mixtapeId, {bool force = false}) async {
+  Future<void> _loadSocialForMixtape(
+    String mixtapeId, {
+    bool force = false,
+  }) async {
     if (!force && _commentCounts.containsKey(mixtapeId)) {
       return;
     }
@@ -216,43 +221,25 @@ class _FeedScreenState extends State<FeedScreen> {
   // ---------------------------------------------------------------------------
 
   int _trackCountForMix(Map<String, dynamic> mix) {
-    final payload = mix['tracks'];
-    if (payload is Map<String, dynamic>) {
-      final tracks = payload['tracks'];
-      if (tracks is List) return tracks.length;
-    }
-    return 0;
-  }
-
-  double _asDouble(dynamic v) {
-    if (v is num) return v.toDouble();
-    return double.tryParse(v?.toString() ?? '') ?? 0.0;
+    return MixtapeTracksPayload.fromJson(mix['tracks']).tracks.length;
   }
 
   List<WalkmanMixTrack> _extractPlayableTracks(Map<String, dynamic> mix) {
-    final payload = mix['tracks'];
-    if (payload is! Map<String, dynamic>) return const [];
-    final rawTracks = payload['tracks'];
-    if (rawTracks is! List) return const [];
-
-    final out = <WalkmanMixTrack>[];
-    for (final raw in rawTracks) {
-      if (raw is! Map<String, dynamic>) continue;
-      final fileKey = (raw['file_key'] ?? raw['fileKey'])?.toString() ?? '';
-      if (fileKey.isEmpty) continue;
-      final start = _asDouble(raw['start_seconds']);
-      final end = _asDouble(raw['end_seconds']);
-      if (end <= start) continue;
-      out.add(WalkmanMixTrack(
-        fileKey: fileKey,
-        startSeconds: start,
-        endSeconds: end,
-        title: (raw['title'] ?? '').toString(),
-        artist: (raw['artist'] ?? '').toString(),
-        coverArtUrl: (raw['album_art_url'] ?? raw['albumArtUrl'])?.toString(),
-      ));
-    }
-    return out;
+    final payload = MixtapeTracksPayload.fromJson(mix['tracks']);
+    return payload.tracks
+        .where((c) => c.isPlayable)
+        .map(
+          (c) => WalkmanMixTrack(
+            fileKey: c.fileKey,
+            startSeconds: c.startSeconds,
+            endSeconds: c.endSeconds,
+            title: c.title,
+            artist: c.artist,
+            coverArtUrl: c.albumArtUrl,
+            transitionToNext: c.transitionToNext,
+          ),
+        )
+        .toList(growable: false);
   }
 
   String _fmt(int v) {
@@ -271,8 +258,11 @@ class _FeedScreenState extends State<FeedScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content:
-                Text('Sign in to like mixtapes.', style: GoogleFonts.outfit())),
+          content: Text(
+            'Sign in to like mixtapes.',
+            style: GoogleFonts.outfit(),
+          ),
+        ),
       );
       return;
     }
@@ -290,10 +280,10 @@ class _FeedScreenState extends State<FeedScreen> {
       // Prefer RPC if available. It should perform exactly one toggle.
       var usedRpc = false;
       try {
-        await _supabase.rpc('toggle_mixtape_like', params: {
-          'p_mixtape_id': mixtapeId,
-          'p_user_id': user.id,
-        });
+        await _supabase.rpc(
+          'toggle_mixtape_like',
+          params: {'p_mixtape_id': mixtapeId, 'p_user_id': user.id},
+        );
         usedRpc = true;
       } catch (_) {
         usedRpc = false;
@@ -315,7 +305,10 @@ class _FeedScreenState extends State<FeedScreen> {
         }
         // Best effort: keep aggregate likes in sync.
         try {
-          await _supabase.from('mixtapes').update({'likes': next}).eq('id', mixtapeId);
+          await _supabase
+              .from('mixtapes')
+              .update({'likes': next})
+              .eq('id', mixtapeId);
         } catch (_) {}
       }
 
@@ -342,8 +335,8 @@ class _FeedScreenState extends State<FeedScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content:
-                Text('Could not update like.', style: GoogleFonts.outfit())),
+          content: Text('Could not update like.', style: GoogleFonts.outfit()),
+        ),
       );
     }
   }
@@ -393,16 +386,21 @@ class _FeedScreenState extends State<FeedScreen> {
                 ),
                 Row(
                   children: [
-                    Text('Comments',
-                        style: GoogleFonts.outfit(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600)),
+                    Text(
+                      'Comments',
+                      style: GoogleFonts.outfit(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                     const Spacer(),
                     IconButton(
                       onPressed: () => Navigator.of(ctx).pop(),
-                      icon: const Icon(Icons.close_rounded,
-                          color: Colors.white70),
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        color: Colors.white70,
+                      ),
                     ),
                   ],
                 ),
@@ -413,23 +411,28 @@ class _FeedScreenState extends State<FeedScreen> {
                     if (snap.connectionState == ConnectionState.waiting) {
                       return const Padding(
                         padding: EdgeInsets.symmetric(vertical: 24),
-                        child:
-                            CircularProgressIndicator(color: Colors.blueAccent),
+                        child: CircularProgressIndicator(
+                          color: Colors.blueAccent,
+                        ),
                       );
                     }
                     if (snap.hasError) {
                       return Padding(
                         padding: const EdgeInsets.symmetric(vertical: 18),
-                        child: Text('Could not load comments.',
-                            style: GoogleFonts.outfit(color: Colors.white70)),
+                        child: Text(
+                          'Could not load comments.',
+                          style: GoogleFonts.outfit(color: Colors.white70),
+                        ),
                       );
                     }
                     final items = snap.data ?? const [];
                     if (items.isEmpty) {
                       return Padding(
                         padding: const EdgeInsets.symmetric(vertical: 18),
-                        child: Text('No comments yet.',
-                            style: GoogleFonts.outfit(color: Colors.white70)),
+                        child: Text(
+                          'No comments yet.',
+                          style: GoogleFonts.outfit(color: Colors.white70),
+                        ),
                       );
                     }
                     return ConstrainedBox(
@@ -437,8 +440,8 @@ class _FeedScreenState extends State<FeedScreen> {
                       child: ListView.separated(
                         shrinkWrap: true,
                         itemCount: items.length,
-                        separatorBuilder: (context, index) => const Divider(
-                            height: 1, color: Colors.white10),
+                        separatorBuilder: (context, index) =>
+                            const Divider(height: 1, color: Colors.white10),
                         itemBuilder: (_, i) {
                           final c = items[i];
                           return ListTile(
@@ -449,14 +452,17 @@ class _FeedScreenState extends State<FeedScreen> {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: GoogleFonts.outfit(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 13),
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                              ),
                             ),
                             subtitle: Text(
                               (c['content'] ?? '').toString(),
                               style: GoogleFonts.outfit(
-                                  color: Colors.white70, fontSize: 13),
+                                color: Colors.white70,
+                                fontSize: 13,
+                              ),
                             ),
                           );
                         },
@@ -481,7 +487,9 @@ class _FeedScreenState extends State<FeedScreen> {
                           filled: true,
                           fillColor: Colors.white.withValues(alpha: 0.06),
                           contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 10),
+                            horizontal: 14,
+                            vertical: 10,
+                          ),
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(14),
                             borderSide: BorderSide.none,
@@ -501,10 +509,10 @@ class _FeedScreenState extends State<FeedScreen> {
                                 await _supabase
                                     .from('mixtape_comments')
                                     .insert({
-                                  'mixtape_id': mixtapeId,
-                                  'user_id': user.id,
-                                  'content': text,
-                                });
+                                      'mixtape_id': mixtapeId,
+                                      'user_id': user.id,
+                                      'content': text,
+                                    });
                                 controller.clear();
                                 if (!ctx.mounted) return;
                                 if (Navigator.of(ctx).canPop()) {
@@ -514,8 +522,11 @@ class _FeedScreenState extends State<FeedScreen> {
                                 if (!ctx.mounted) return;
                                 ScaffoldMessenger.of(ctx).showSnackBar(
                                   SnackBar(
-                                      content: Text('Could not post comment.',
-                                          style: GoogleFonts.outfit())),
+                                    content: Text(
+                                      'Could not post comment.',
+                                      style: GoogleFonts.outfit(),
+                                    ),
+                                  ),
                                 );
                               }
                             },
@@ -523,11 +534,13 @@ class _FeedScreenState extends State<FeedScreen> {
                         backgroundColor: const Color(0xFF3A7BFF),
                         foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14)),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
                       ),
-                      child: Text('Send',
-                          style:
-                              GoogleFonts.outfit(fontWeight: FontWeight.w600)),
+                      child: Text(
+                        'Send',
+                        style: GoogleFonts.outfit(fontWeight: FontWeight.w600),
+                      ),
                     ),
                   ],
                 ),
@@ -559,7 +572,8 @@ class _FeedScreenState extends State<FeedScreen> {
   Widget build(BuildContext context) {
     if (_loading) {
       return const Center(
-          child: CircularProgressIndicator(color: Colors.blueAccent));
+        child: CircularProgressIndicator(color: Colors.blueAccent),
+      );
     }
     if (_error != null) {
       return Center(
@@ -568,13 +582,16 @@ class _FeedScreenState extends State<FeedScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(_error!,
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.outfit(color: Colors.white70)),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: GoogleFonts.outfit(color: Colors.white70),
+              ),
               const SizedBox(height: 12),
               FilledButton(
-                  onPressed: _loadFeed,
-                  child: Text('Retry', style: GoogleFonts.outfit())),
+                onPressed: _loadFeed,
+                child: Text('Retry', style: GoogleFonts.outfit()),
+              ),
             ],
           ),
         ),
@@ -582,8 +599,10 @@ class _FeedScreenState extends State<FeedScreen> {
     }
     if (_mixtapes.isEmpty) {
       return Center(
-        child: Text('No mixtapes yet.',
-            style: GoogleFonts.outfit(color: Colors.white70)),
+        child: Text(
+          'No mixtapes yet.',
+          style: GoogleFonts.outfit(color: Colors.white70),
+        ),
       );
     }
 
@@ -606,7 +625,8 @@ class _FeedScreenState extends State<FeedScreen> {
             final description = (mix['description'] as String?)?.trim();
             final trackCount = _trackCountForMix(mix);
 
-            final likeCount = _likeCounts[id] ??
+            final likeCount =
+                _likeCounts[id] ??
                 (mix['likes'] is num ? (mix['likes'] as num).toInt() : 0);
             final liked = _likedByMe.contains(id);
             final creator = _creatorLabel(creatorId);
@@ -632,22 +652,25 @@ class _FeedScreenState extends State<FeedScreen> {
                 // Cassette card — centered
                 Center(
                   child: _FeedCassetteCard(
-                    title:
-                        title == null || title.isEmpty ? 'Untitled Mix' : title,
+                    title: title == null || title.isEmpty
+                        ? 'Untitled Mix'
+                        : title,
                     artist: creator,
                     trackCount: trackCount,
                     description: description,
                     onTapPlay: () {
                       final tracks = _extractPlayableTracks(mix);
-                      Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => WalkmanPlayerScreen(
-                          title: title == null || title.isEmpty
-                              ? 'Mixtape'
-                              : title,
-                          artist: creator,
-                          mixTracks: tracks,
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => WalkmanPlayerScreen(
+                            title: title == null || title.isEmpty
+                                ? 'Mixtape'
+                                : title,
+                            artist: creator,
+                            mixTracks: tracks,
+                          ),
                         ),
-                      ));
+                      );
                     },
                   ),
                 ),
@@ -664,9 +687,7 @@ class _FeedScreenState extends State<FeedScreen> {
                             ? Icons.favorite_rounded
                             : Icons.favorite_border_rounded,
                         label: _fmt(likeCount),
-                        color: liked
-                            ? const Color(0xFFFF4D6A)
-                            : Colors.white70,
+                        color: liked ? const Color(0xFFFF4D6A) : Colors.white70,
                         onTap: id.isEmpty ? null : () => _toggleLike(id),
                       ),
                       const SizedBox(height: 18),
@@ -714,9 +735,9 @@ class _FeedScreenState extends State<FeedScreen> {
           child: SafeArea(
             bottom: false,
             child: GestureDetector(
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const ExploreScreen()),
-              ),
+              onTap: () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const ExploreScreen())),
               child: Container(
                 height: 44,
                 decoration: BoxDecoration(
@@ -727,14 +748,20 @@ class _FeedScreenState extends State<FeedScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 14),
                 child: Row(
                   children: [
-                    const Icon(Icons.search_rounded,
-                        color: Colors.white54, size: 20),
+                    const Icon(
+                      Icons.search_rounded,
+                      color: Colors.white54,
+                      size: 20,
+                    ),
                     const SizedBox(width: 10),
-                    Text('Explore',
-                        style: GoogleFonts.outfit(
-                            color: Colors.white70,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500)),
+                    Text(
+                      'Explore',
+                      style: GoogleFonts.outfit(
+                        color: Colors.white70,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -772,8 +799,10 @@ class _SocialButton extends StatelessWidget {
         children: [
           Icon(icon, size: 28, color: color),
           const SizedBox(height: 4),
-          Text(label,
-              style: GoogleFonts.outfit(color: Colors.white70, fontSize: 11)),
+          Text(
+            label,
+            style: GoogleFonts.outfit(color: Colors.white70, fontSize: 11),
+          ),
         ],
       ),
     );
@@ -809,11 +838,7 @@ class _FeedCassetteCard extends StatelessWidget {
           gradient: const LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [
-              Color(0xFF1E2B4A),
-              Color(0xFF18223D),
-              Color(0xFF121A31),
-            ],
+            colors: [Color(0xFF1E2B4A), Color(0xFF18223D), Color(0xFF121A31)],
           ),
           borderRadius: BorderRadius.circular(22),
           border: Border.all(color: Colors.white12, width: 1.2),
@@ -831,8 +856,10 @@ class _FeedCassetteCard extends StatelessWidget {
             children: [
               // ── Header: title + artist ──
               Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 14,
+                ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -889,15 +916,19 @@ class _FeedCassetteCard extends StatelessWidget {
                               color: const Color(0xFF3A7BFF),
                               boxShadow: [
                                 BoxShadow(
-                                  color: const Color(0xFF3A7BFF)
-                                      .withValues(alpha: 0.4),
+                                  color: const Color(
+                                    0xFF3A7BFF,
+                                  ).withValues(alpha: 0.4),
                                   blurRadius: 18,
                                   offset: const Offset(0, 6),
                                 ),
                               ],
                             ),
-                            child: const Icon(Icons.play_arrow_rounded,
-                                size: 34, color: Colors.white),
+                            child: const Icon(
+                              Icons.play_arrow_rounded,
+                              size: 34,
+                              color: Colors.white,
+                            ),
                           ),
                         ),
                       ),
@@ -911,13 +942,16 @@ class _FeedCassetteCard extends StatelessWidget {
               if (description != null && description!.trim().isNotEmpty)
                 Container(
                   width: double.infinity,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 10,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.15),
                     border: Border(
                       top: BorderSide(
-                          color: Colors.white.withValues(alpha: 0.06)),
+                        color: Colors.white.withValues(alpha: 0.06),
+                      ),
                     ),
                   ),
                   child: Text(

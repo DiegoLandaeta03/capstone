@@ -4,13 +4,15 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'models/mixtape_payload.dart';
+import 'services/signed_audio_url_service.dart';
+import 'services/transition_validation_service.dart';
+import 'services/waveform_service.dart';
+import 'widgets/transition_editor_card.dart';
+import 'widgets/waveform_trim_editor.dart';
 
 class MixtapeEditorScreen extends StatefulWidget {
-  const MixtapeEditorScreen({
-    super.key,
-    required this.songs,
-    this.onSaved,
-  });
+  const MixtapeEditorScreen({super.key, required this.songs, this.onSaved});
 
   /// Payload passed from Create screen.
   /// Each map should contain: id, title, artist, albumArtUrl, fileKey, durationSeconds.
@@ -23,6 +25,10 @@ class MixtapeEditorScreen extends StatefulWidget {
 
 class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
   final SupabaseClient _supabase = Supabase.instance.client;
+  final SignedAudioUrlService _signedAudioUrlService = SignedAudioUrlService();
+  final TransitionValidationService _transitionValidationService =
+      const TransitionValidationService();
+  final WaveformService _waveformService = WaveformService();
   final AudioPlayer _player = AudioPlayer();
 
   late List<_MixtapeClip> _clips;
@@ -40,6 +46,11 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
   int _currentIndexPlaying = 0;
   int? _singleSongIndex;
   bool _isSavingMixtape = false;
+  bool _showTransitionPalette = false;
+  bool _isLoadingSongLibrary = false;
+  List<_LibrarySong> _songLibrary = const [];
+  final Map<String, WaveformData> _waveformByClipId = {};
+  final Set<String> _loadingWaveforms = {};
 
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<int?>? _indexSub;
@@ -51,6 +62,9 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
   void initState() {
     super.initState();
     _clips = widget.songs.map(_MixtapeClip.fromMap).toList();
+    for (final clip in _clips) {
+      _ensureWaveformLoaded(clip);
+    }
 
     _indexSub = _player.currentIndexStream.listen((idx) {
       if (idx == null) return;
@@ -64,10 +78,14 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
       if (_isMixMode) {
         final offsetBefore = _offsetUntil(_currentIndexPlaying);
         final currentClip = _clips[_currentIndexPlaying];
-        final effectiveLocal =
-            localSeconds.clamp(0.0, currentClip.trimmedDuration);
-        final mixPos = (offsetBefore + effectiveLocal)
-            .clamp(0.0, _totalTrimmedDuration);
+        final effectiveLocal = localSeconds.clamp(
+          0.0,
+          currentClip.trimmedDuration,
+        );
+        final mixPos = (offsetBefore + effectiveLocal).clamp(
+          0.0,
+          _totalTrimmedDuration,
+        );
 
         if (mounted) {
           setState(() {
@@ -78,10 +96,11 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
         final idx = _singleSongIndex!;
         final clip = _clips[idx];
         final offsetBefore = _offsetUntil(idx);
-        final effectiveLocal =
-            localSeconds.clamp(0.0, clip.trimmedDuration);
-        final mixPos = (offsetBefore + effectiveLocal)
-            .clamp(0.0, _totalTrimmedDuration);
+        final effectiveLocal = localSeconds.clamp(0.0, clip.trimmedDuration);
+        final mixPos = (offsetBefore + effectiveLocal).clamp(
+          0.0,
+          _totalTrimmedDuration,
+        );
 
         if (mounted) {
           setState(() {
@@ -108,18 +127,299 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
     return sum;
   }
 
-  Future<String?> _buildSongUrl(_MixtapeClip clip) async {
-    if (clip.fileKey == null || clip.fileKey!.isEmpty) return null;
-    final objectPath =
-        clip.fileKey!.endsWith('.mp3') ? clip.fileKey! : '${clip.fileKey!}.mp3';
-    try {
-      final signedUrl = await _supabase.storage
-          .from('song-files')
-          .createSignedUrl(objectPath, const Duration(minutes: 5).inSeconds);
-      return signedUrl;
-    } catch (_) {
-      return null;
+  Future<void> _ensureWaveformLoaded(_MixtapeClip clip) async {
+    if (_waveformByClipId.containsKey(clip.id) ||
+        _loadingWaveforms.contains(clip.id)) {
+      return;
     }
+    _loadingWaveforms.add(clip.id);
+    final model = clip.toPayloadModel(position: 0);
+    final data = await _waveformService.loadForClip(model);
+    if (!mounted) return;
+    setState(() {
+      _waveformByClipId[clip.id] = data;
+      _loadingWaveforms.remove(clip.id);
+    });
+  }
+
+  void _onTransitionChanged(int index, ClipTransition transition) {
+    if (index < 0 || index >= _clips.length) return;
+    setState(() {
+      _clips[index].transitionToNext = transition;
+    });
+  }
+
+  String _transitionLabel(ClipTransition transition) {
+    return switch (transition.type) {
+      TransitionType.hardCut => 'Hard cut',
+      TransitionType.fade =>
+        'Fade (${transition.fadeOutSeconds.toStringAsFixed(1)}s out / ${transition.fadeInSeconds.toStringAsFixed(1)}s in)',
+      TransitionType.crossfade =>
+        'Crossfade (${transition.crossfadeSeconds.toStringAsFixed(1)}s)',
+    };
+  }
+
+  ClipTransition _defaultTransitionForType(TransitionType type) {
+    return switch (type) {
+      TransitionType.hardCut => const ClipTransition.hardCut(),
+      TransitionType.fade => const ClipTransition(
+        type: TransitionType.fade,
+        fadeOutSeconds: 1.0,
+        fadeInSeconds: 1.0,
+      ),
+      TransitionType.crossfade => const ClipTransition(
+        type: TransitionType.crossfade,
+        crossfadeSeconds: 1.0,
+      ),
+    };
+  }
+
+  Future<void> _loadSongLibraryIfNeeded() async {
+    if (_songLibrary.isNotEmpty || _isLoadingSongLibrary) return;
+    _isLoadingSongLibrary = true;
+    try {
+      final rows = await _supabase
+          .from('songs')
+          .select(
+            'id, title, artist, album_art_url, file_key, duration_seconds',
+          )
+          .order('title');
+      final parsed = (rows as List<dynamic>)
+          .whereType<Map<String, dynamic>>()
+          .map(_LibrarySong.fromMap)
+          .where((s) => s.id.isNotEmpty)
+          .toList(growable: false);
+      if (!mounted) return;
+      setState(() {
+        _songLibrary = parsed;
+      });
+    } catch (_) {
+      // Keep picker optional. If loading fails, we show an inline message.
+    } finally {
+      _isLoadingSongLibrary = false;
+    }
+  }
+
+  Future<void> _openQuickAddMenu() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF16213E),
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(
+                  Icons.library_music_rounded,
+                  color: Colors.white,
+                ),
+                title: Text(
+                  'Add songs',
+                  style: GoogleFonts.outfit(color: Colors.white),
+                ),
+                subtitle: Text(
+                  'Append more songs to this mixtape.',
+                  style: GoogleFonts.outfit(color: Colors.white70),
+                ),
+                onTap: () => Navigator.of(ctx).pop('songs'),
+              ),
+              ListTile(
+                leading: const Icon(
+                  Icons.swap_horiz_rounded,
+                  color: Colors.white,
+                ),
+                title: Text(
+                  _showTransitionPalette
+                      ? 'Hide transition palette'
+                      : 'Show transition palette',
+                  style: GoogleFonts.outfit(color: Colors.white),
+                ),
+                subtitle: Text(
+                  'Drag transition chips between songs.',
+                  style: GoogleFonts.outfit(color: Colors.white70),
+                ),
+                onTap: () => Navigator.of(ctx).pop('transitions'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (!mounted || choice == null) return;
+    if (choice == 'songs') {
+      await _openAddSongsSheet();
+    } else if (choice == 'transitions') {
+      setState(() {
+        _showTransitionPalette = !_showTransitionPalette;
+      });
+    }
+  }
+
+  Future<void> _openAddSongsSheet() async {
+    await _loadSongLibraryIfNeeded();
+    if (!mounted) return;
+
+    final existingIds = _clips.map((c) => c.id).toSet();
+    final available = _songLibrary
+        .where((s) => !existingIds.contains(s.id))
+        .toList();
+    final selected = <String>{};
+    String query = '';
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF16213E),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            final visible = available
+                .where((song) {
+                  if (query.trim().isEmpty) return true;
+                  final q = query.toLowerCase();
+                  return song.title.toLowerCase().contains(q) ||
+                      song.artist.toLowerCase().contains(q);
+                })
+                .toList(growable: false);
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                child: SizedBox(
+                  height: MediaQuery.of(ctx).size.height * 0.7,
+                  child: Column(
+                    children: [
+                      Text(
+                        'Add Songs',
+                        style: GoogleFonts.outfit(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        onChanged: (v) => setSheetState(() => query = v),
+                        style: GoogleFonts.outfit(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: 'Search song or artist',
+                          hintStyle: GoogleFonts.outfit(color: Colors.white54),
+                          prefixIcon: const Icon(
+                            Icons.search,
+                            color: Colors.white54,
+                          ),
+                          filled: true,
+                          fillColor: Colors.white.withValues(alpha: 0.08),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Expanded(
+                        child: _isLoadingSongLibrary
+                            ? const Center(child: CircularProgressIndicator())
+                            : visible.isEmpty
+                            ? Center(
+                                child: Text(
+                                  'No songs available to add.',
+                                  style: GoogleFonts.outfit(
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: visible.length,
+                                itemBuilder: (_, i) {
+                                  final song = visible[i];
+                                  final isChecked = selected.contains(song.id);
+                                  return CheckboxListTile(
+                                    value: isChecked,
+                                    activeColor: Colors.blueAccent,
+                                    controlAffinity:
+                                        ListTileControlAffinity.leading,
+                                    title: Text(
+                                      song.title,
+                                      style: GoogleFonts.outfit(
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                    subtitle: Text(
+                                      song.artist,
+                                      style: GoogleFonts.outfit(
+                                        color: Colors.white70,
+                                      ),
+                                    ),
+                                    onChanged: (v) {
+                                      setSheetState(() {
+                                        if (v == true) {
+                                          selected.add(song.id);
+                                        } else {
+                                          selected.remove(song.id);
+                                        }
+                                      });
+                                    },
+                                  );
+                                },
+                              ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () => Navigator.of(ctx).pop(),
+                              child: Text(
+                                'Cancel',
+                                style: GoogleFonts.outfit(),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: selected.isEmpty
+                                  ? null
+                                  : () {
+                                      final add = available
+                                          .where((s) => selected.contains(s.id))
+                                          .map(
+                                            (s) =>
+                                                _MixtapeClip.fromMap(s.toMap()),
+                                          )
+                                          .toList(growable: false);
+                                      setState(() {
+                                        _clips.addAll(add);
+                                      });
+                                      for (final clip in add) {
+                                        _ensureWaveformLoaded(clip);
+                                      }
+                                      Navigator.of(ctx).pop();
+                                    },
+                              child: Text(
+                                'Add selected',
+                                style: GoogleFonts.outfit(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<String?> _buildSongUrl(_MixtapeClip clip) async {
+    return _signedAudioUrlService.signedSongUrl(clip.fileKey);
   }
 
   AudioSource _buildClipSource(_MixtapeClip clip) {
@@ -144,14 +444,15 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
     if (_clips.isEmpty) return;
 
     await _ensureUrls();
-    final sources = _clips.where((c) => c.url != null).map(_buildClipSource).toList();
+    final sources = _clips
+        .where((c) => c.url != null)
+        .map(_buildClipSource)
+        .toList();
     if (sources.isEmpty) return;
 
     try {
       await _player.stop();
-      await _player.setAudioSource(
-        ConcatenatingAudioSource(children: sources),
-      );
+      await _player.setAudioSource(ConcatenatingAudioSource(children: sources));
       setState(() {
         _isPlaying = true;
         _isMixMode = true;
@@ -211,9 +512,7 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
       );
     } else {
       await _playSingle(idx);
-      await _player.seek(
-        Duration(milliseconds: (local * 1000).round()),
-      );
+      await _player.seek(Duration(milliseconds: (local * 1000).round()));
     }
 
     if (mounted) {
@@ -237,25 +536,16 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
   void _enterZoomForClip(int index) {
     if (index < 0 || index >= _clips.length) return;
     final clip = _clips[index];
-    final fullMax = clip.originalDurationSeconds
-        .toDouble()
-        .clamp(1, 600);
+    final fullMax = clip.originalDurationSeconds.toDouble().clamp(1, 600);
     final center = (clip.startSeconds + clip.endSeconds) / 2;
     const zoomPadding = 25.0;
-    final halfWidth = (clip.trimmedDuration / 2)
-        .clamp(zoomPadding, 60.0);
+    final halfWidth = (clip.trimmedDuration / 2).clamp(zoomPadding, 60.0);
     setState(() {
       _zoomedClipIndex = index;
-      _zoomMin = (center - halfWidth)
-          .clamp(0.0, fullMax - 10)
-          .toDouble();
-      _zoomMax = (center + halfWidth)
-          .clamp(10.0, fullMax)
-          .toDouble();
+      _zoomMin = (center - halfWidth).clamp(0.0, fullMax - 10).toDouble();
+      _zoomMax = (center + halfWidth).clamp(10.0, fullMax).toDouble();
       if (_zoomMax - _zoomMin < 10) {
-        _zoomMin = (_zoomMax - 10)
-            .clamp(0.0, fullMax)
-            .toDouble();
+        _zoomMin = (_zoomMax - 10).clamp(0.0, fullMax).toDouble();
       }
     });
   }
@@ -274,23 +564,27 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
   }
 
   Map<String, dynamic> _buildTracksPayload() {
-    final tracks = <Map<String, dynamic>>[];
+    final tracks = <MixtapeClip>[];
     for (int i = 0; i < _clips.length; i++) {
       final clip = _clips[i];
-      tracks.add({
-        'position': i,
-        'song_id': clip.id,
-        'title': clip.title,
-        'artist': clip.artist,
-        'album_art_url': clip.albumArtUrl,
-        'file_key': clip.fileKey,
-        'start_seconds': clip.startSeconds,
-        'end_seconds': clip.endSeconds,
-        'original_duration_seconds': clip.originalDurationSeconds,
-        'trimmed_duration_seconds': clip.trimmedDuration,
-      });
+      final waveform = _waveformByClipId[clip.id];
+      final descriptor = waveform == null
+          ? clip.waveform
+          : WaveformDescriptor(
+              peakCacheKey: waveform.cacheKey,
+              source: waveform.source,
+              sampleCount: waveform.sampleCount,
+              samples: waveform.peaks.take(200).toList(growable: false),
+              sampleResolution: waveform.sampleCount,
+            );
+      tracks.add(
+        clip.toPayloadModel(position: i, waveformOverride: descriptor),
+      );
     }
-    return {'tracks': tracks};
+    final validated = _transitionValidationService.normalizeClipTransitions(
+      tracks,
+    );
+    return MixtapeTracksPayload(version: 2, tracks: validated).toJson();
   }
 
   Future<void> _saveMixtape({
@@ -333,12 +627,7 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Mixtape saved.',
-            style: GoogleFonts.outfit(),
-          ),
-        ),
+        SnackBar(content: Text('Mixtape saved.', style: GoogleFonts.outfit())),
       );
       widget.onSaved?.call();
       Navigator.of(context).pop(true);
@@ -479,6 +768,11 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
         ),
         backgroundColor: const Color(0xFF16213E),
         actions: [
+          IconButton(
+            onPressed: _isSavingMixtape ? null : _openQuickAddMenu,
+            icon: const Icon(Icons.add_rounded),
+            tooltip: 'Add songs or transitions',
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: IconButton(
@@ -505,13 +799,38 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Text(
-              'Drag to reorder songs. Use the range sliders to snip each song. The playhead shows time across the whole mix.',
-              style: GoogleFonts.outfit(
-                color: Colors.white70,
-                fontSize: 13,
-              ),
+              'Tap a song to edit. Trim with the waveform slider, then adjust the view range below it for precise cuts. Drag transition chips between songs to set boundaries.',
+              style: GoogleFonts.outfit(color: Colors.white70, fontSize: 13),
             ),
           ),
+          if (_showTransitionPalette)
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF16213E),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white12),
+              ),
+              child: Row(
+                children: [
+                  _TransitionChip(type: TransitionType.hardCut),
+                  const SizedBox(width: 8),
+                  _TransitionChip(type: TransitionType.fade),
+                  const SizedBox(width: 8),
+                  _TransitionChip(type: TransitionType.crossfade),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _showTransitionPalette = false;
+                      });
+                    },
+                    child: Text('Hide', style: GoogleFonts.outfit()),
+                  ),
+                ],
+              ),
+            ),
           const SizedBox(height: 8),
           Expanded(
             child: _clips.isEmpty
@@ -538,7 +857,8 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
                       final clip = _clips[index];
                       final isSelected = index == _selectedIndex;
                       final itemTotalOffset = _offsetUntil(index);
-                      final isRowPlaying = _isPlaying &&
+                      final isRowPlaying =
+                          _isPlaying &&
                           !_isMixMode &&
                           _singleSongIndex == index;
 
@@ -558,8 +878,7 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
                         child: ListTile(
                           onTap: () {
                             setState(() {
-                              _selectedIndex =
-                                  isSelected ? -1 : index;
+                              _selectedIndex = isSelected ? -1 : index;
                             });
                           },
                           minVerticalPadding: isSelected ? 12 : 4,
@@ -579,14 +898,17 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
                                 child: SizedBox(
                                   width: 44,
                                   height: 44,
-                                  child: clip.albumArtUrl != null &&
+                                  child:
+                                      clip.albumArtUrl != null &&
                                           clip.albumArtUrl!.isNotEmpty
                                       ? Image.network(
                                           clip.albumArtUrl!,
                                           fit: BoxFit.cover,
                                         )
                                       : Container(
-                                          color: Colors.blueAccent.withAlpha(60),
+                                          color: Colors.blueAccent.withAlpha(
+                                            60,
+                                          ),
                                           child: const Icon(
                                             Icons.music_note_rounded,
                                             color: Colors.white70,
@@ -624,102 +946,155 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
                               ),
                               if (isSelected) ...[
                                 const SizedBox(height: 6),
+                                WaveformTrimEditor(
+                                  peaks:
+                                      _waveformByClipId[clip.id]?.peaks ??
+                                      const <double>[
+                                        0.2,
+                                        0.4,
+                                        0.3,
+                                        0.6,
+                                        0.5,
+                                        0.3,
+                                      ],
+                                  clipStartSeconds: clip.startSeconds,
+                                  clipEndSeconds: clip.endSeconds,
+                                  viewportStartSeconds:
+                                      _zoomedClipIndex == index ? _zoomMin : 0,
+                                  viewportEndSeconds: _zoomedClipIndex == index
+                                      ? _zoomMax
+                                      : clip.originalDurationSeconds.toDouble(),
+                                  songDurationSeconds: clip
+                                      .originalDurationSeconds
+                                      .toDouble(),
+                                  onTrimChanged: (values) {
+                                    setState(() {
+                                      clip.startSeconds = values.start;
+                                      clip.endSeconds = values.end;
+                                    });
+                                  },
+                                  onViewportChanged: (values) {
+                                    setState(() {
+                                      _zoomedClipIndex = index;
+                                      _zoomMin = values.start;
+                                      _zoomMax = values.end;
+                                    });
+                                  },
+                                ),
                                 Row(
                                   children: [
                                     if (_zoomedClipIndex != index)
                                       TextButton.icon(
-                                        onPressed: () => _enterZoomForClip(index),
+                                        onPressed: () =>
+                                            _enterZoomForClip(index),
                                         icon: const Icon(
                                           Icons.zoom_in_rounded,
                                           size: 18,
-                                          color: Colors.blueAccent,
                                         ),
                                         label: Text(
                                           'Zoom in',
                                           style: GoogleFonts.outfit(
-                                            color: Colors.blueAccent,
                                             fontSize: 12,
                                           ),
                                         ),
                                       ),
                                     if (_zoomedClipIndex == index)
-                                      FilledButton.icon(
+                                      TextButton.icon(
                                         onPressed: _exitZoom,
-                                        style: FilledButton.styleFrom(
-                                          backgroundColor: Colors.blueAccent,
-                                          foregroundColor: Colors.white,
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 12,
-                                            vertical: 6,
-                                          ),
+                                        icon: const Icon(
+                                          Icons.zoom_out_rounded,
+                                          size: 18,
                                         ),
-                                        icon: const Icon(Icons.check_rounded, size: 16),
                                         label: Text(
-                                          'Finish',
+                                          'Reset zoom',
                                           style: GoogleFonts.outfit(
                                             fontSize: 12,
-                                            fontWeight: FontWeight.w600,
                                           ),
                                         ),
                                       ),
                                   ],
                                 ),
-                                const SizedBox(height: 4),
-                                SliderTheme(
-                                  data: SliderTheme.of(context).copyWith(
-                                    trackHeight: 8,
-                                    thumbShape: const RoundSliderThumbShape(
-                                      enabledThumbRadius: 9,
+                                if (_loadingWaveforms.contains(clip.id))
+                                  const Padding(
+                                    padding: EdgeInsets.only(bottom: 4),
+                                    child: LinearProgressIndicator(
+                                      minHeight: 2,
                                     ),
                                   ),
-                                  child: Builder(
-                                    builder: (context) {
-                                      final sliderMin = _zoomedClipIndex == index
-                                          ? _zoomMin
-                                          : 0.0;
-                                      final sliderMax = _zoomedClipIndex == index
-                                          ? _zoomMax
-                                          : (clip.originalDurationSeconds
-                                                  .toDouble()
-                                                  .clamp(1, 600))
-                                              .toDouble();
-                                      final startC = clip.startSeconds
-                                          .clamp(sliderMin, sliderMax)
-                                          .toDouble();
-                                      final endC = clip.endSeconds
-                                          .clamp(sliderMin, sliderMax)
-                                          .toDouble();
-                                      return RangeSlider(
-                                        values: RangeValues(
-                                          startC,
-                                          endC < startC ? startC : endC,
-                                        ),
-                                        min: sliderMin,
-                                        max: sliderMax,
-                                        labels: RangeLabels(
-                                          _formatTime(clip.startSeconds),
-                                          _formatTime(clip.endSeconds),
-                                        ),
-                                        onChanged: (values) {
-                                          setState(() {
-                                            clip.startSeconds = values.start;
-                                            clip.endSeconds = values.end;
-                                          });
-                                        },
-                                      );
-                                    },
-                                  ),
-                                ),
                                 if (_zoomedClipIndex == index)
                                   Padding(
                                     padding: const EdgeInsets.only(top: 4),
                                     child: Text(
-                                      'Zoomed in · Press Finish to see full song',
+                                      'Zoomed view enabled. Use Reset zoom to return.',
                                       style: GoogleFonts.outfit(
                                         color: Colors.blueAccent,
                                         fontSize: 10,
                                       ),
                                     ),
+                                  ),
+                              ],
+                              if (index < _clips.length - 1) ...[
+                                const SizedBox(height: 8),
+                                DragTarget<TransitionType>(
+                                  onAcceptWithDetails: (details) {
+                                    final transition =
+                                        _defaultTransitionForType(details.data);
+                                    _onTransitionChanged(index, transition);
+                                  },
+                                  builder: (context, candidates, rejected) {
+                                    final highlight = candidates.isNotEmpty;
+                                    return Container(
+                                      width: double.infinity,
+                                      padding: const EdgeInsets.fromLTRB(
+                                        10,
+                                        8,
+                                        10,
+                                        8,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: highlight
+                                            ? Colors.blueAccent.withValues(
+                                                alpha: 0.25,
+                                              )
+                                            : Colors.white.withValues(
+                                                alpha: 0.04,
+                                              ),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(
+                                          color: highlight
+                                              ? Colors.blueAccent
+                                              : Colors.white12,
+                                        ),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.compare_arrows_rounded,
+                                            size: 16,
+                                            color: Colors.white70,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              'Between this song and next: ${_transitionLabel(clip.transitionToNext)}'
+                                              '${highlight ? ' (drop to apply)' : ''}',
+                                              style: GoogleFonts.outfit(
+                                                color: Colors.white70,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
+                                if (isSelected)
+                                  TransitionEditorCard(
+                                    value: clip.transitionToNext,
+                                    maxSeconds: clip.trimmedDuration,
+                                    onChanged: (next) =>
+                                        _onTransitionChanged(index, next),
                                   ),
                               ],
                               const SizedBox(height: 2),
@@ -759,9 +1134,7 @@ class _MixtapeEditorScreenState extends State<MixtapeEditorScreen> {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
               decoration: const BoxDecoration(
                 color: Color(0xFF16213E),
-                border: Border(
-                  top: BorderSide(color: Colors.white10),
-                ),
+                border: Border(top: BorderSide(color: Colors.white10)),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -836,10 +1209,12 @@ class _MixtapeClip {
     this.albumArtUrl,
     this.fileKey,
     this.url,
+    this.waveform,
+    this.transitionToNext = const ClipTransition.hardCut(),
     double? startSeconds,
     double? endSeconds,
-  })  : startSeconds = startSeconds ?? 0,
-        endSeconds = endSeconds ?? originalDurationSeconds.toDouble();
+  }) : startSeconds = startSeconds ?? 0,
+       endSeconds = endSeconds ?? originalDurationSeconds.toDouble();
 
   final String id;
   final String title;
@@ -847,17 +1222,23 @@ class _MixtapeClip {
   final String? albumArtUrl;
   final String? fileKey;
   String? url;
+  WaveformDescriptor? waveform;
+  ClipTransition transitionToNext;
   final int originalDurationSeconds;
 
   double startSeconds;
   double endSeconds;
 
-  double get trimmedDuration =>
-      (endSeconds - startSeconds).clamp(1.0, originalDurationSeconds.toDouble());
+  double get trimmedDuration => (endSeconds - startSeconds).clamp(
+    1.0,
+    originalDurationSeconds.toDouble(),
+  );
 
   factory _MixtapeClip.fromMap(Map<String, dynamic> map) {
     final duration =
-        (map['durationSeconds'] as int?) ?? (map['duration_seconds'] as int?) ?? 30;
+        (map['durationSeconds'] as int?) ??
+        (map['duration_seconds'] as int?) ??
+        30;
     return _MixtapeClip(
       id: '${map['id']}',
       title: map['title'] as String? ?? 'Untitled',
@@ -866,6 +1247,119 @@ class _MixtapeClip {
           map['albumArtUrl'] as String? ?? map['album_art_url'] as String?,
       fileKey: map['fileKey'] as String? ?? map['file_key'] as String?,
       originalDurationSeconds: duration,
+      waveform: WaveformDescriptor.fromJson(map['waveform']),
+      transitionToNext:
+          ClipTransition.fromJson(map['transition_to_next']) ??
+          const ClipTransition.hardCut(),
+    );
+  }
+
+  MixtapeClip toPayloadModel({
+    required int position,
+    WaveformDescriptor? waveformOverride,
+  }) {
+    return MixtapeClip(
+      position: position,
+      songId: id,
+      title: title,
+      artist: artist,
+      albumArtUrl: albumArtUrl,
+      fileKey: fileKey ?? '',
+      startSeconds: startSeconds,
+      endSeconds: endSeconds,
+      originalDurationSeconds: originalDurationSeconds,
+      trimmedDurationSeconds: trimmedDuration,
+      waveform: waveformOverride ?? waveform,
+      transitionToNext: transitionToNext,
+    ).normalized();
+  }
+}
+
+class _LibrarySong {
+  const _LibrarySong({
+    required this.id,
+    required this.title,
+    required this.artist,
+    this.albumArtUrl,
+    this.fileKey,
+    this.durationSeconds = 30,
+  });
+
+  final String id;
+  final String title;
+  final String artist;
+  final String? albumArtUrl;
+  final String? fileKey;
+  final int durationSeconds;
+
+  factory _LibrarySong.fromMap(Map<String, dynamic> map) {
+    final durationRaw = map['duration_seconds'];
+    final duration = durationRaw is int
+        ? durationRaw
+        : (durationRaw is num ? durationRaw.round() : 30);
+    return _LibrarySong(
+      id: (map['id'] ?? '').toString(),
+      title: (map['title'] ?? 'Untitled').toString(),
+      artist: (map['artist'] ?? 'Unknown Artist').toString(),
+      albumArtUrl: map['album_art_url'] as String?,
+      fileKey: map['file_key'] as String?,
+      durationSeconds: duration <= 0 ? 30 : duration,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'id': id,
+      'title': title,
+      'artist': artist,
+      'album_art_url': albumArtUrl,
+      'file_key': fileKey,
+      'duration_seconds': durationSeconds,
+    };
+  }
+}
+
+class _TransitionChip extends StatelessWidget {
+  const _TransitionChip({required this.type});
+
+  final TransitionType type;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = switch (type) {
+      TransitionType.hardCut => 'Hard cut',
+      TransitionType.fade => 'Fade',
+      TransitionType.crossfade => 'Crossfade',
+    };
+    return LongPressDraggable<TransitionType>(
+      data: type,
+      feedback: Material(
+        color: Colors.transparent,
+        child: _chip(label, isActive: true),
+      ),
+      childWhenDragging: Opacity(opacity: 0.5, child: _chip(label)),
+      child: _chip(label),
+    );
+  }
+
+  Widget _chip(String label, {bool isActive = false}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: isActive
+            ? Colors.blueAccent
+            : Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.outfit(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 }
@@ -876,6 +1370,3 @@ String _formatTime(double seconds) {
   final secs = total % 60;
   return '${minutes.toString().padLeft(1, '0')}:${secs.toString().padLeft(2, '0')}';
 }
-
-
-

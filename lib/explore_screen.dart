@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'models/mixtape_payload.dart';
 import 'walkman_player_screen.dart';
 
 // 2. Explore Page
@@ -90,8 +91,9 @@ class _ExploreScreenState extends State<ExploreScreen> {
           for (final r in (rows as List).cast<Map<String, dynamic>>()) {
             final id = (r['id'] ?? '').toString();
             if (id.isEmpty) continue;
-            final name =
-                (r['username'] ?? r['full_name'] ?? '').toString().trim();
+            final name = (r['username'] ?? r['full_name'] ?? '')
+                .toString()
+                .trim();
             if (name.isNotEmpty) map[id] = name;
           }
           creatorNameById = map;
@@ -146,9 +148,9 @@ class _ExploreScreenState extends State<ExploreScreen> {
       final creatorName =
           (_creatorNameById[creatorId] ?? _creatorLabel(creatorId))
               .toLowerCase();
-      final mixGenres = _genresForMixtape(m)
-          .map((g) => g.toLowerCase())
-          .join(' ');
+      final mixGenres = _genresForMixtape(
+        m,
+      ).map((g) => g.toLowerCase()).join(' ');
       return title.contains(query) ||
           description.contains(query) ||
           id.contains(query) ||
@@ -189,15 +191,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
     required Map<String, dynamic> mix,
     required Map<String, List<String>> genresBySongId,
   }) {
-    final payload = mix['tracks'];
-    if (payload is! Map<String, dynamic>) return const [];
-    final rawTracks = payload['tracks'];
-    if (rawTracks is! List) return const [];
-
     final set = <String>{};
-    for (final raw in rawTracks) {
-      if (raw is! Map<String, dynamic>) continue;
-      final songId = (raw['song_id'] ?? raw['songId'] ?? '').toString();
+    final payload = MixtapeTracksPayload.fromJson(mix['tracks']);
+    for (final clip in payload.tracks) {
+      final songId = clip.songId;
       if (songId.isEmpty) continue;
       for (final g in (genresBySongId[songId] ?? const <String>[])) {
         final trimmed = g.trim();
@@ -218,46 +215,26 @@ class _ExploreScreenState extends State<ExploreScreen> {
     return _extractGenresFromMix(mix: mix, genresBySongId: _genresBySongId);
   }
 
-  double _asDouble(dynamic value) {
-    if (value is num) return value.toDouble();
-    return double.tryParse(value?.toString() ?? '') ?? 0.0;
-  }
-
   List<WalkmanMixTrack> _extractPlayableTracks(Map<String, dynamic> mix) {
-    final payload = mix['tracks'];
-    if (payload is! Map<String, dynamic>) return const [];
-    final rawTracks = payload['tracks'];
-    if (rawTracks is! List) return const [];
-
-    final out = <WalkmanMixTrack>[];
-    for (final raw in rawTracks) {
-      if (raw is! Map<String, dynamic>) continue;
-      final fileKey = (raw['file_key'] ?? raw['fileKey'])?.toString() ?? '';
-      if (fileKey.isEmpty) continue;
-      final start = _asDouble(raw['start_seconds']);
-      final end = _asDouble(raw['end_seconds']);
-      if (end <= start) continue;
-      out.add(
-        WalkmanMixTrack(
-          fileKey: fileKey,
-          startSeconds: start,
-          endSeconds: end,
-          title: (raw['title'] ?? '').toString(),
-          artist: (raw['artist'] ?? '').toString(),
-          coverArtUrl: (raw['album_art_url'] ?? raw['albumArtUrl'])?.toString(),
-        ),
-      );
-    }
-    return out;
+    final payload = MixtapeTracksPayload.fromJson(mix['tracks']);
+    return payload.tracks
+        .where((c) => c.isPlayable)
+        .map(
+          (c) => WalkmanMixTrack(
+            fileKey: c.fileKey,
+            startSeconds: c.startSeconds,
+            endSeconds: c.endSeconds,
+            title: c.title,
+            artist: c.artist,
+            coverArtUrl: c.albumArtUrl,
+            transitionToNext: c.transitionToNext,
+          ),
+        )
+        .toList(growable: false);
   }
 
   int _trackCountForMix(Map<String, dynamic> mix) {
-    final payload = mix['tracks'];
-    if (payload is Map<String, dynamic>) {
-      final tracks = payload['tracks'];
-      if (tracks is List) return tracks.length;
-    }
-    return 0;
+    return MixtapeTracksPayload.fromJson(mix['tracks']).tracks.length;
   }
 
   Future<void> _openMix(Map<String, dynamic> mix) async {
@@ -317,13 +294,17 @@ class _ExploreScreenState extends State<ExploreScreen> {
               TextField(
                 controller: _controller,
                 decoration: InputDecoration(
-                  hintText: 'Search title, description, username, or mixtape ID...',
+                  hintText:
+                      'Search title, description, username, or mixtape ID...',
                   hintStyle: GoogleFonts.outfit(color: Colors.white38),
                   prefixIcon: const Icon(Icons.search, color: Colors.white38),
                   suffixIcon: _controller.text.trim().isEmpty
                       ? null
                       : IconButton(
-                          icon: const Icon(Icons.close_rounded, color: Colors.white54),
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Colors.white54,
+                          ),
                           onPressed: () {
                             _controller.clear();
                             _applySearch('');
@@ -341,182 +322,192 @@ class _ExploreScreenState extends State<ExploreScreen> {
               Expanded(
                 child: _loading
                     ? const Center(
-                        child: CircularProgressIndicator(color: Colors.blueAccent),
+                        child: CircularProgressIndicator(
+                          color: Colors.blueAccent,
+                        ),
                       )
                     : _error != null
-                        ? Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  _error!,
-                                  textAlign: TextAlign.center,
-                                  style: GoogleFonts.outfit(color: Colors.white70),
-                                ),
-                                const SizedBox(height: 12),
-                                FilledButton(
-                                  onPressed: _loadMixtapes,
-                                  child: Text('Retry', style: GoogleFonts.outfit()),
-                                ),
-                              ],
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _error!,
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.outfit(color: Colors.white70),
                             ),
-                          )
-                        : _results.isEmpty
-                            ? Center(
-                                child: Text(
-                                  'No results.',
-                                  style: GoogleFonts.outfit(color: Colors.white70),
-                                ),
-                              )
-                            : GridView.builder(
-                                gridDelegate:
-                                    const SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: 2,
-                                  crossAxisSpacing: 14,
-                                  mainAxisSpacing: 14,
-                                  childAspectRatio: 0.92,
-                                ),
-                                itemCount: _results.length,
-                                itemBuilder: (context, index) {
-                                  final mix = _results[index];
-                                  final title = (mix['title'] as String?)?.trim();
-                                  final description =
-                                      (mix['description'] as String?)?.trim();
-                                  final coverArtUrl = (mix['cover_art_url'] ?? '')
-                                      .toString()
-                                      .trim();
-                                  final id = (mix['id'] ?? '').toString();
-                                  final creatorId =
-                                      (mix['creator_id'] ?? '').toString();
-                                  final creator = _creatorLabel(creatorId);
-                                  final trackCount = _trackCountForMix(mix);
-                                  final genres = _genresForMixtape(mix);
+                            const SizedBox(height: 12),
+                            FilledButton(
+                              onPressed: _loadMixtapes,
+                              child: Text('Retry', style: GoogleFonts.outfit()),
+                            ),
+                          ],
+                        ),
+                      )
+                    : _results.isEmpty
+                    ? Center(
+                        child: Text(
+                          'No results.',
+                          style: GoogleFonts.outfit(color: Colors.white70),
+                        ),
+                      )
+                    : GridView.builder(
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 2,
+                              crossAxisSpacing: 14,
+                              mainAxisSpacing: 14,
+                              childAspectRatio: 0.92,
+                            ),
+                        itemCount: _results.length,
+                        itemBuilder: (context, index) {
+                          final mix = _results[index];
+                          final title = (mix['title'] as String?)?.trim();
+                          final description = (mix['description'] as String?)
+                              ?.trim();
+                          final coverArtUrl = (mix['cover_art_url'] ?? '')
+                              .toString()
+                              .trim();
+                          final id = (mix['id'] ?? '').toString();
+                          final creatorId = (mix['creator_id'] ?? '')
+                              .toString();
+                          final creator = _creatorLabel(creatorId);
+                          final trackCount = _trackCountForMix(mix);
+                          final genres = _genresForMixtape(mix);
 
-                                  return InkWell(
-                                    onTap: () => _openMix(mix),
-                                    borderRadius: BorderRadius.circular(16),
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(16),
-                                        color: const Color(0xFF16213E),
-                                        border: Border.all(color: Colors.white10),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withValues(alpha: 0.25),
-                                            blurRadius: 14,
-                                            offset: const Offset(0, 6),
-                                          ),
-                                        ],
-                                      ),
-                                      child: ClipRRect(
-                                        borderRadius: BorderRadius.circular(16),
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                                          children: [
-                                            Expanded(
-                                              child: coverArtUrl.isNotEmpty
-                                                  ? Image.network(
-                                                      coverArtUrl,
-                                                      fit: BoxFit.cover,
-                                                      errorBuilder:
-                                                          (context, error, stack) {
-                                                        return Container(
-                                                          color: Colors.blueAccent
-                                                              .withValues(alpha: 0.12),
-                                                          child: const Icon(
-                                                            Icons.queue_music_rounded,
-                                                            color: Colors.white70,
-                                                            size: 34,
-                                                          ),
-                                                        );
-                                                      },
-                                                    )
-                                                  : Container(
+                          return InkWell(
+                            onTap: () => _openMix(mix),
+                            borderRadius: BorderRadius.circular(16),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(16),
+                                color: const Color(0xFF16213E),
+                                border: Border.all(color: Colors.white10),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.25),
+                                    blurRadius: 14,
+                                    offset: const Offset(0, 6),
+                                  ),
+                                ],
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(16),
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    Expanded(
+                                      child: coverArtUrl.isNotEmpty
+                                          ? Image.network(
+                                              coverArtUrl,
+                                              fit: BoxFit.cover,
+                                              errorBuilder:
+                                                  (context, error, stack) {
+                                                    return Container(
                                                       color: Colors.blueAccent
-                                                          .withValues(alpha: 0.12),
+                                                          .withValues(
+                                                            alpha: 0.12,
+                                                          ),
                                                       child: const Icon(
-                                                        Icons.queue_music_rounded,
+                                                        Icons
+                                                            .queue_music_rounded,
                                                         color: Colors.white70,
                                                         size: 34,
                                                       ),
-                                                    ),
+                                                    );
+                                                  },
+                                            )
+                                          : Container(
+                                              color: Colors.blueAccent
+                                                  .withValues(alpha: 0.12),
+                                              child: const Icon(
+                                                Icons.queue_music_rounded,
+                                                color: Colors.white70,
+                                                size: 34,
+                                              ),
                                             ),
-                                            Padding(
-                                              padding: const EdgeInsets.fromLTRB(
-                                                  12, 10, 12, 12),
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Text(
-                                                    (title == null || title.isEmpty)
-                                                        ? 'Untitled Mix'
-                                                        : title,
-                                                    maxLines: 1,
-                                                    overflow: TextOverflow.ellipsis,
-                                                    style: GoogleFonts.outfit(
-                                                      color: Colors.white,
-                                                      fontWeight: FontWeight.w600,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(height: 4),
-                                                  Text(
-                                                    (description == null ||
-                                                            description.isEmpty)
-                                                        ? '$trackCount tracks'
-                                                        : description,
-                                                    maxLines: 2,
-                                                    overflow: TextOverflow.ellipsis,
-                                                    style: GoogleFonts.outfit(
-                                                      color: Colors.white70,
-                                                      fontSize: 12,
-                                                      height: 1.25,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(height: 6),
-                                                  Text(
-                                                    '@$creator',
-                                                    maxLines: 1,
-                                                    overflow: TextOverflow.ellipsis,
-                                                    style: GoogleFonts.outfit(
-                                                      color: Colors.white54,
-                                                      fontSize: 11,
-                                                      fontWeight: FontWeight.w600,
-                                                    ),
-                                                  ),
-                                                  if (genres.isNotEmpty) ...[
-                                                    const SizedBox(height: 6),
-                                                    Text(
-                                                      genres.take(3).join(' · '),
-                                                      maxLines: 1,
-                                                      overflow: TextOverflow.ellipsis,
-                                                      style: GoogleFonts.outfit(
-                                                        color: Colors.blueAccent,
-                                                        fontSize: 11,
-                                                        fontWeight: FontWeight.w600,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                  const SizedBox(height: 8),
-                                                  Text(
-                                                    id.isEmpty ? '' : id,
-                                                    maxLines: 1,
-                                                    overflow: TextOverflow.ellipsis,
-                                                    style: GoogleFonts.outfit(
-                                                      color: Colors.white38,
-                                                      fontSize: 11,
-                                                    ),
-                                                  ),
-                                                ],
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        12,
+                                        10,
+                                        12,
+                                        12,
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            (title == null || title.isEmpty)
+                                                ? 'Untitled Mix'
+                                                : title,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: GoogleFonts.outfit(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            (description == null ||
+                                                    description.isEmpty)
+                                                ? '$trackCount tracks'
+                                                : description,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: GoogleFonts.outfit(
+                                              color: Colors.white70,
+                                              fontSize: 12,
+                                              height: 1.25,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          Text(
+                                            '@$creator',
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: GoogleFonts.outfit(
+                                              color: Colors.white54,
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                          if (genres.isNotEmpty) ...[
+                                            const SizedBox(height: 6),
+                                            Text(
+                                              genres.take(3).join(' · '),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: GoogleFonts.outfit(
+                                                color: Colors.blueAccent,
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w600,
                                               ),
                                             ),
                                           ],
-                                        ),
+                                          const SizedBox(height: 8),
+                                          Text(
+                                            id.isEmpty ? '' : id,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: GoogleFonts.outfit(
+                                              color: Colors.white38,
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
-                                  );
-                                },
+                                  ],
+                                ),
                               ),
+                            ),
+                          );
+                        },
+                      ),
               ),
             ],
           ),
@@ -525,4 +516,3 @@ class _ExploreScreenState extends State<ExploreScreen> {
     );
   }
 }
-

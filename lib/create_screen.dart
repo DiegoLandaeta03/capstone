@@ -4,14 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'services/signed_audio_url_service.dart';
 import 'mixtape_editor_screen.dart';
 
 // 3. Plus/Create Page
 class CreateScreen extends StatefulWidget {
-  const CreateScreen({
-    super.key,
-    this.onMixtapeSaved,
-  });
+  const CreateScreen({super.key, this.onMixtapeSaved});
 
   final VoidCallback? onMixtapeSaved;
 
@@ -21,6 +19,7 @@ class CreateScreen extends StatefulWidget {
 
 class _CreateScreenState extends State<CreateScreen> {
   final SupabaseClient _supabase = Supabase.instance.client;
+  final SignedAudioUrlService _signedAudioUrlService = SignedAudioUrlService();
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   bool _isLoading = true;
@@ -54,9 +53,7 @@ class _CreateScreenState extends State<CreateScreen> {
       final data = await _supabase.from('songs').select().order('title');
 
       final songs = (data as List<dynamic>)
-          .map(
-            (row) => _Song.fromMap(row as Map<String, dynamic>),
-          )
+          .map((row) => _Song.fromMap(row as Map<String, dynamic>))
           .toList();
 
       setState(() {
@@ -139,23 +136,7 @@ class _CreateScreenState extends State<CreateScreen> {
   }
 
   Future<String?> _buildSongAudioUrl(_Song song) async {
-    if (song.fileKey == null || song.fileKey!.isEmpty) return null;
-
-    // Audio files are stored in a private Supabase Storage bucket named
-    // 'song-files' and objects are saved as "<fileKey>.mp3".
-    final objectPath = song.fileKey!.endsWith('.mp3')
-        ? song.fileKey!
-        : '${song.fileKey!}.mp3';
-
-    try {
-      final signedUrl = await _supabase.storage
-          .from('song-files')
-          .createSignedUrl(objectPath, const Duration(minutes: 5).inSeconds);
-
-      return signedUrl;
-    } catch (_) {
-      return null;
-    }
+    return _signedAudioUrlService.signedSongUrl(song.fileKey);
   }
 
   @override
@@ -201,8 +182,9 @@ class _CreateScreenState extends State<CreateScreen> {
           : _songs.where((song) {
               final title = song.title.toLowerCase();
               final artist = song.artist.toLowerCase();
-              final genreText =
-                  song.genres.map((g) => g.toLowerCase()).join(' ');
+              final genreText = song.genres
+                  .map((g) => g.toLowerCase())
+                  .join(' ');
 
               return title.contains(query) ||
                   artist.contains(query) ||
@@ -241,7 +223,8 @@ class _CreateScreenState extends State<CreateScreen> {
                         SizedBox(
                           width: 48,
                           height: 48,
-                          child: song.albumArtUrl != null &&
+                          child:
+                              song.albumArtUrl != null &&
                                   song.albumArtUrl!.isNotEmpty
                               ? Image.network(
                                   song.albumArtUrl!,
@@ -280,9 +263,7 @@ class _CreateScreenState extends State<CreateScreen> {
                 ),
                 subtitle: Text(
                   song.artist,
-                  style: GoogleFonts.outfit(
-                    color: Colors.white70,
-                  ),
+                  style: GoogleFonts.outfit(color: Colors.white70),
                 ),
                 trailing: Icon(
                   isSelected
@@ -328,8 +309,7 @@ class _CreateScreenState extends State<CreateScreen> {
                   decoration: InputDecoration(
                     hintText: 'Search by artist, title, or genre...',
                     hintStyle: GoogleFonts.outfit(color: Colors.white38),
-                    prefixIcon:
-                        const Icon(Icons.search, color: Colors.white38),
+                    prefixIcon: const Icon(Icons.search, color: Colors.white38),
                     filled: true,
                     fillColor: const Color(0xFF16213E),
                     border: OutlineInputBorder(
@@ -346,13 +326,10 @@ class _CreateScreenState extends State<CreateScreen> {
           if (_songs.isNotEmpty)
             Container(
               width: double.infinity,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: const BoxDecoration(
                 color: Color(0xFF16213E),
-                border: Border(
-                  top: BorderSide(color: Colors.white10),
-                ),
+                border: Border(top: BorderSide(color: Colors.white10)),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -411,9 +388,7 @@ class _CreateScreenState extends State<CreateScreen> {
                     ),
                     child: Text(
                       'Next',
-                      style: GoogleFonts.outfit(
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: GoogleFonts.outfit(fontWeight: FontWeight.w600),
                     ),
                   ),
                 ],
@@ -471,10 +446,9 @@ class _Song {
       durationSeconds: map['duration_seconds'] is int
           ? map['duration_seconds'] as int
           : (map['duration_seconds'] is num
-              ? (map['duration_seconds'] as num).round()
-              : null),
+                ? (map['duration_seconds'] as num).round()
+                : null),
       genres: parsedGenres,
     );
   }
 }
-
