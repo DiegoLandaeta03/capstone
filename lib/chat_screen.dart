@@ -32,6 +32,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _sending = false;
   String? _error;
+  Future<_ChatData>? _chatFuture;
 
   String? get _myUserId => _supabase.auth.currentUser?.id;
 
@@ -56,7 +57,7 @@ class _ChatScreenState extends State<ChatScreen> {
         .or(
           'and(sender_id.eq.$myId,receiver_id.eq.${widget.receiverId}),and(sender_id.eq.${widget.receiverId},receiver_id.eq.$myId)',
         )
-        .order('created_at', ascending: true);
+        .order('created_at', ascending: false);
 
     final messages = (rows as List).cast<Map<String, dynamic>>();
     final mixtapeIds = <String>{};
@@ -82,6 +83,12 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     return _ChatData(messages: messages, mixtapeById: mixtapeById);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _chatFuture = _loadChatData();
   }
 
   Future<void> _sendMessage() async {
@@ -122,22 +129,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
       if (clearTextField) _messageController.clear();
       if (!mounted) return;
-      setState(() {});
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeOut,
-          );
-        }
+      setState(() {
+        _chatFuture = _loadChatData();
       });
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString());
     } finally {
-      if (!mounted) return;
-      setState(() => _sending = false);
+      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -145,15 +144,14 @@ class _ChatScreenState extends State<ChatScreen> {
     required String mixtapeId,
     required String receiverId,
   }) async {
-    final rows = await _supabase
+    final rows = (await _supabase
         .from('mixtapes')
         .select('shared_users')
         .eq('id', mixtapeId)
-        .limit(1);
+        .limit(1)) as List<dynamic>;
 
-    if (rows is! List || rows.isEmpty) return;
-    final row = rows.first;
-    if (row is! Map<String, dynamic>) return;
+    if (rows.isEmpty) return;
+    final row = rows.first as Map<String, dynamic>;
 
     final existingRaw = row['shared_users'];
     final existing = <String>{};
@@ -396,7 +394,7 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Expanded(
             child: FutureBuilder<_ChatData>(
-              future: _loadChatData(),
+              future: _chatFuture,
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
@@ -432,10 +430,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 final myId = _myUserId;
                 return ListView.builder(
                   controller: _scrollController,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 12,
-                  ),
+                  reverse: true,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
                     final msg = messages[index];
