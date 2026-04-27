@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'models/mixtape_payload.dart';
 import 'walkman_player_screen.dart';
 
 class _ChatData {
-  const _ChatData({
-    required this.messages,
-    required this.mixtapeById,
-  });
+  const _ChatData({required this.messages, required this.mixtapeById});
 
   final List<Map<String, dynamic>> messages;
   final Map<String, Map<String, dynamic>> mixtapeById;
@@ -34,6 +32,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _sending = false;
   String? _error;
+  Future<_ChatData>? _chatFuture;
 
   String? get _myUserId => _supabase.auth.currentUser?.id;
 
@@ -58,7 +57,7 @@ class _ChatScreenState extends State<ChatScreen> {
         .or(
           'and(sender_id.eq.$myId,receiver_id.eq.${widget.receiverId}),and(sender_id.eq.${widget.receiverId},receiver_id.eq.$myId)',
         )
-        .order('created_at', ascending: true);
+        .order('created_at', ascending: false);
 
     final messages = (rows as List).cast<Map<String, dynamic>>();
     final mixtapeIds = <String>{};
@@ -72,7 +71,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mixtapeIds.isNotEmpty) {
       final mixtapeRows = await _supabase
           .from('mixtapes')
-          .select('id, title, description, tracks, cover_art_url, cover_art_url')
+          .select(
+            'id, title, description, tracks, cover_art_url, cover_art_url',
+          )
           .inFilter('id', mixtapeIds.toList());
       for (final row in (mixtapeRows as List).cast<Map<String, dynamic>>()) {
         final id = row['id']?.toString();
@@ -82,6 +83,12 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     return _ChatData(messages: messages, mixtapeById: mixtapeById);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _chatFuture = _loadChatData();
   }
 
   Future<void> _sendMessage() async {
@@ -122,22 +129,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
       if (clearTextField) _messageController.clear();
       if (!mounted) return;
-      setState(() {});
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeOut,
-          );
-        }
+      setState(() {
+        _chatFuture = _loadChatData();
       });
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString());
     } finally {
-      if (!mounted) return;
-      setState(() => _sending = false);
+      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -145,15 +144,14 @@ class _ChatScreenState extends State<ChatScreen> {
     required String mixtapeId,
     required String receiverId,
   }) async {
-    final rows = await _supabase
+    final rows = (await _supabase
         .from('mixtapes')
         .select('shared_users')
         .eq('id', mixtapeId)
-        .limit(1);
+        .limit(1)) as List<dynamic>;
 
-    if (rows is! List || rows.isEmpty) return;
-    final row = rows.first;
-    if (row is! Map<String, dynamic>) return;
+    if (rows.isEmpty) return;
+    final row = rows.first as Map<String, dynamic>;
 
     final existingRaw = row['shared_users'];
     final existing = <String>{};
@@ -169,7 +167,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
     await _supabase
         .from('mixtapes')
-        .update({'shared_users': existing.toList()}).eq('id', mixtapeId);
+        .update({'shared_users': existing.toList()})
+        .eq('id', mixtapeId);
   }
 
   Future<List<Map<String, dynamic>>> _loadMyMixtapes() async {
@@ -225,7 +224,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       itemCount: mixes.length,
                       itemBuilder: (context, index) {
                         final mix = mixes[index];
-                        final title = (mix['title'] ?? 'Untitled mixtape').toString();
+                        final title = (mix['title'] ?? 'Untitled mixtape')
+                            .toString();
                         final coverUrl =
                             (mix['cover_art_url'] ?? mix['cover_art_url'] ?? '')
                                 .toString()
@@ -250,7 +250,10 @@ class _ChatScreenState extends State<ChatScreen> {
                             title,
                             style: GoogleFonts.outfit(color: Colors.white),
                           ),
-                          trailing: const Icon(Icons.chevron_right, color: Colors.white38),
+                          trailing: const Icon(
+                            Icons.chevron_right,
+                            color: Colors.white38,
+                          ),
                         );
                       },
                     ),
@@ -291,16 +294,17 @@ class _ChatScreenState extends State<ChatScreen> {
     final content = msg['content']?.toString() ?? '';
     final mixId = _extractMixtapeId(content);
     if (mixId == null) {
-      return Text(
-        content,
-        style: GoogleFonts.outfit(color: Colors.white),
-      );
+      return Text(content, style: GoogleFonts.outfit(color: Colors.white));
     }
 
     final mix = mixtapeById[mixId];
     final title = (mix?['title'] ?? 'Shared mixtape').toString();
-    final coverUrl = (mix?['cover_art_url'] ?? mix?['cover_art_url'] ?? '').toString().trim();
-    final tracks = mix == null ? const <WalkmanMixTrack>[] : _extractPlayableTracks(mix);
+    final coverUrl = (mix?['cover_art_url'] ?? mix?['cover_art_url'] ?? '')
+        .toString()
+        .trim();
+    final tracks = mix == null
+        ? const <WalkmanMixTrack>[]
+        : _extractPlayableTracks(mix);
 
     return InkWell(
       borderRadius: BorderRadius.circular(10),
@@ -311,7 +315,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 MaterialPageRoute(
                   builder: (_) => WalkmanPlayerScreen(
                     title: title,
-                    artist: (mix?['description'] ?? '${tracks.length} track mix').toString(),
+                    artist:
+                        (mix?['description'] ?? '${tracks.length} track mix')
+                            .toString(),
                     mixTracks: tracks,
                   ),
                 ),
@@ -344,8 +350,8 @@ class _ChatScreenState extends State<ChatScreen> {
             mix == null
                 ? 'Mixtape unavailable'
                 : tracks.isEmpty
-                    ? 'Mixtape has no playable tracks'
-                    : 'Tap to open mixtape',
+                ? 'Mixtape has no playable tracks'
+                : 'Tap to open mixtape',
             style: GoogleFonts.outfit(
               color: isMine ? Colors.white70 : Colors.white60,
               fontSize: 12,
@@ -356,41 +362,22 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  double _asDouble(dynamic value) {
-    if (value is num) return value.toDouble();
-    return double.tryParse(value?.toString() ?? '') ?? 0.0;
-  }
-
   List<WalkmanMixTrack> _extractPlayableTracks(Map<String, dynamic> mix) {
-    final tracksPayload = mix['tracks'];
-    if (tracksPayload is! Map<String, dynamic>) return const [];
-
-    final rawTracks = tracksPayload['tracks'];
-    if (rawTracks is! List) return const [];
-
-    final playableTracks = <WalkmanMixTrack>[];
-    for (final raw in rawTracks) {
-      if (raw is! Map<String, dynamic>) continue;
-      final fileKey = (raw['file_key'] ?? raw['fileKey'])?.toString() ?? '';
-      if (fileKey.isEmpty) continue;
-
-      final start = _asDouble(raw['start_seconds']);
-      final end = _asDouble(raw['end_seconds']);
-      if (end <= start) continue;
-
-      playableTracks.add(
-        WalkmanMixTrack(
-          fileKey: fileKey,
-          startSeconds: start,
-          endSeconds: end,
-          title: (raw['title'] ?? '').toString(),
-          artist: (raw['artist'] ?? '').toString(),
-          coverArtUrl: (raw['cover_art_url'] ?? raw['albumArtUrl'])?.toString(),
-        ),
-      );
-    }
-
-    return playableTracks;
+    final payload = MixtapeTracksPayload.fromJson(mix['tracks']);
+    return payload.tracks
+        .where((c) => c.isPlayable)
+        .map(
+          (c) => WalkmanMixTrack(
+            fileKey: c.fileKey,
+            startSeconds: c.startSeconds,
+            endSeconds: c.endSeconds,
+            title: c.title,
+            artist: c.artist,
+            coverArtUrl: c.albumArtUrl,
+            transitionToNext: c.transitionToNext,
+          ),
+        )
+        .toList(growable: false);
   }
 
   @override
@@ -407,7 +394,7 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Expanded(
             child: FutureBuilder<_ChatData>(
-              future: _loadChatData(),
+              future: _chatFuture,
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
@@ -427,8 +414,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 }
 
                 final data = snapshot.data;
-                final messages = data?.messages ?? const <Map<String, dynamic>>[];
-                final mixtapeById = data?.mixtapeById ?? const <String, Map<String, dynamic>>{};
+                final messages =
+                    data?.messages ?? const <Map<String, dynamic>>[];
+                final mixtapeById =
+                    data?.mixtapeById ?? const <String, Map<String, dynamic>>{};
                 if (messages.isEmpty) {
                   return Center(
                     child: Text(
@@ -441,6 +430,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 final myId = _myUserId;
                 return ListView.builder(
                   controller: _scrollController,
+                  reverse: true,
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
@@ -448,15 +438,22 @@ class _ChatScreenState extends State<ChatScreen> {
                     final isMine = msg['sender_id']?.toString() == myId;
 
                     return Align(
-                      alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
+                      alignment: isMine
+                          ? Alignment.centerRight
+                          : Alignment.centerLeft,
                       child: Container(
                         margin: const EdgeInsets.symmetric(vertical: 4),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
                         constraints: BoxConstraints(
                           maxWidth: MediaQuery.of(context).size.width * 0.72,
                         ),
                         decoration: BoxDecoration(
-                          color: isMine ? Colors.blueAccent : const Color(0xFF16213E),
+                          color: isMine
+                              ? Colors.blueAccent
+                              : const Color(0xFF16213E),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: _buildMessageBody(

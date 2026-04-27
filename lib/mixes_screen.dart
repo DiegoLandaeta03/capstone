@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'models/mixtape_payload.dart';
 import 'walkman_player_screen.dart';
 
 class MixesScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class _MixesScreenState extends State<MixesScreen> {
   List<Map<String, dynamic>> _myMixes = const [];
   List<Map<String, dynamic>> _sharedMixes = const [];
   Map<String, String> _creatorNameById = const {};
+  bool _sharing = false;
 
   @override
   void initState() {
@@ -26,7 +28,9 @@ class _MixesScreenState extends State<MixesScreen> {
     _loadMixes();
   }
 
-  Future<List<Map<String, dynamic>>> _fetchSharedMixesForUser(String userId) async {
+  Future<List<Map<String, dynamic>>> _fetchSharedMixesForUser(
+    String userId,
+  ) async {
     // Try Postgres array contains syntax first (works for uuid[] and text[]).
     try {
       final rows = await _supabase
@@ -43,7 +47,8 @@ class _MixesScreenState extends State<MixesScreen> {
       final rows = await _supabase
           .from('mixtapes')
           .select()
-          .contains('shared_users', [userId]).neq('creator_id', userId)
+          .contains('shared_users', [userId])
+          .neq('creator_id', userId)
           .order('created_at', ascending: false);
       return (rows as List<dynamic>).cast<Map<String, dynamic>>();
     } catch (_) {}
@@ -93,7 +98,8 @@ class _MixesScreenState extends State<MixesScreen> {
               .from('profiles')
               .select('id, username')
               .inFilter('id', creatorIds);
-          for (final row in (rows as List<dynamic>).cast<Map<String, dynamic>>()) {
+          for (final row
+              in (rows as List<dynamic>).cast<Map<String, dynamic>>()) {
             final id = row['id']?.toString() ?? '';
             if (id.isEmpty) continue;
             final username = (row['username'] ?? '').toString().trim();
@@ -121,49 +127,25 @@ class _MixesScreenState extends State<MixesScreen> {
   }
 
   int _trackCountForMix(Map<String, dynamic> mix) {
-    final tracksPayload = mix['tracks'];
-    if (tracksPayload is Map<String, dynamic>) {
-      final tracks = tracksPayload['tracks'];
-      if (tracks is List) return tracks.length;
-    }
-    return 0;
-  }
-
-  double _asDouble(dynamic value) {
-    if (value is num) return value.toDouble();
-    return double.tryParse(value?.toString() ?? '') ?? 0.0;
+    return MixtapeTracksPayload.fromJson(mix['tracks']).tracks.length;
   }
 
   List<WalkmanMixTrack> _extractPlayableTracks(Map<String, dynamic> mix) {
-    final tracksPayload = mix['tracks'];
-    if (tracksPayload is! Map<String, dynamic>) return const [];
-
-    final rawTracks = tracksPayload['tracks'];
-    if (rawTracks is! List) return const [];
-
-    final playableTracks = <WalkmanMixTrack>[];
-    for (final raw in rawTracks) {
-      if (raw is! Map<String, dynamic>) continue;
-      final fileKey = (raw['file_key'] ?? raw['fileKey'])?.toString() ?? '';
-      if (fileKey.isEmpty) continue;
-
-      final start = _asDouble(raw['start_seconds']);
-      final end = _asDouble(raw['end_seconds']);
-      if (end <= start) continue;
-
-      playableTracks.add(
-        WalkmanMixTrack(
-          fileKey: fileKey,
-          startSeconds: start,
-          endSeconds: end,
-          title: (raw['title'] ?? '').toString(),
-          artist: (raw['artist'] ?? '').toString(),
-          coverArtUrl: (raw['album_art_url'] ?? raw['albumArtUrl'])?.toString(),
-        ),
-      );
-    }
-
-    return playableTracks;
+    final payload = MixtapeTracksPayload.fromJson(mix['tracks']);
+    return payload.tracks
+        .where((c) => c.isPlayable)
+        .map(
+          (c) => WalkmanMixTrack(
+            fileKey: c.fileKey,
+            startSeconds: c.startSeconds,
+            endSeconds: c.endSeconds,
+            title: c.title,
+            artist: c.artist,
+            coverArtUrl: c.albumArtUrl,
+            transitionToNext: c.transitionToNext,
+          ),
+        )
+        .toList(growable: false);
   }
 
   Future<void> _confirmAndDeleteMix(Map<String, dynamic> mix) async {
@@ -219,16 +201,14 @@ class _MixesScreenState extends State<MixesScreen> {
 
       setState(() {
         _myMixes = _myMixes.where((m) => '${m['id']}' != mixId).toList();
-        _sharedMixes =
-            _sharedMixes.where((m) => '${m['id']}' != mixId).toList();
+        _sharedMixes = _sharedMixes
+            .where((m) => '${m['id']}' != mixId)
+            .toList();
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Mixtape deleted.',
-            style: GoogleFonts.outfit(),
-          ),
+          content: Text('Mixtape deleted.', style: GoogleFonts.outfit()),
         ),
       );
     } catch (_) {
@@ -241,6 +221,194 @@ class _MixesScreenState extends State<MixesScreen> {
           ),
         ),
       );
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _loadUsers() async {
+    try {
+      final rows = await _supabase.from('Profiles').select('*').order('updated_at');
+      return (rows as List).cast<Map<String, dynamic>>();
+    } catch (_) {
+      final rows = await _supabase.from('profiles').select('*').order('updated_at');
+      return (rows as List).cast<Map<String, dynamic>>();
+    }
+  }
+
+  String _displayName(Map<String, dynamic> row) {
+    final metadata = row['user_metadata'];
+    if (metadata is Map<String, dynamic>) {
+      final fullName = metadata['full_name']?.toString().trim();
+      if (fullName != null && fullName.isNotEmpty) return fullName;
+      final name = metadata['name']?.toString().trim();
+      if (name != null && name.isNotEmpty) return name;
+    }
+
+    final email = row['email']?.toString().trim();
+    if (email != null && email.isNotEmpty) return email.split('@').first;
+
+    final username = row['username']?.toString() ?? 'Unknown user';
+    return username;
+  }
+
+  String? _avatarUrl(Map<String, dynamic> row) {
+    final direct = row['avatar_url']?.toString().trim();
+    if (direct != null && direct.isNotEmpty) return direct;
+    final metadata = row['user_metadata'];
+    if (metadata is Map<String, dynamic>) {
+      final fromMeta = metadata['avatar_url']?.toString().trim();
+      if (fromMeta != null && fromMeta.isNotEmpty) return fromMeta;
+      final picture = metadata['picture']?.toString().trim();
+      if (picture != null && picture.isNotEmpty) return picture;
+    }
+    return null;
+  }
+
+  Widget _friendAvatar(Map<String, dynamic> row) {
+    final avatarUrl = _avatarUrl(row);
+    if (avatarUrl == null || avatarUrl.isEmpty) {
+      return CircleAvatar(
+        backgroundColor: Colors.blueAccent.withAlpha(128),
+        child: const Icon(Icons.person, color: Colors.white),
+      );
+    }
+    return CircleAvatar(
+      backgroundColor: Colors.blueAccent.withAlpha(90),
+      backgroundImage: NetworkImage(avatarUrl),
+      onBackgroundImageError: (_, __) {},
+      child: const SizedBox.shrink(),
+    );
+  }
+
+  Future<void> _appendSharedUserToMixtape({
+    required String mixtapeId,
+    required String receiverId,
+  }) async {
+    final rows = (await _supabase
+        .from('mixtapes')
+        .select('shared_users')
+        .eq('id', mixtapeId)
+        .limit(1)) as List<dynamic>;
+
+    if (rows.isEmpty) return;
+    final row = rows.first as Map<String, dynamic>;
+
+    final existingRaw = row['shared_users'];
+    final existing = <String>{};
+    if (existingRaw is List) {
+      for (final value in existingRaw) {
+        final id = value?.toString() ?? '';
+        if (id.isNotEmpty) existing.add(id);
+      }
+    }
+
+    if (existing.contains(receiverId)) return;
+    existing.add(receiverId);
+
+    await _supabase
+        .from('mixtapes')
+        .update({'shared_users': existing.toList()}).eq('id', mixtapeId);
+  }
+
+  Future<void> _shareMix(Map<String, dynamic> mix) async {
+    if (_sharing) return;
+
+    final myId = _supabase.auth.currentUser?.id;
+    if (myId == null || myId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Sign in to share mixes.', style: GoogleFonts.outfit())),
+      );
+      return;
+    }
+
+    final mixId = mix['id']?.toString() ?? '';
+    if (mixId.isEmpty) return;
+
+    setState(() => _sharing = true);
+    try {
+      final users = await _loadUsers();
+      if (!mounted) return;
+
+      final visibleUsers = users.where((u) => u['id']?.toString() != myId).toList();
+      if (visibleUsers.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No friends found to share with.', style: GoogleFonts.outfit())),
+        );
+        return;
+      }
+
+      final chosen = await showModalBottomSheet<Map<String, dynamic>>(
+        context: context,
+        backgroundColor: const Color(0xFF16213E),
+        isScrollControlled: true,
+        builder: (context) {
+          return SafeArea(
+            child: SizedBox(
+              height: MediaQuery.of(context).size.height * 0.65,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                    child: Text(
+                      'Share mix with…',
+                      style: GoogleFonts.outfit(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 18,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: visibleUsers.length,
+                      itemBuilder: (context, index) {
+                        final row = visibleUsers[index];
+                        final receiverId = row['id']?.toString() ?? '';
+                        final receiverName = _displayName(row);
+                        return ListTile(
+                          enabled: receiverId.isNotEmpty,
+                          leading: _friendAvatar(row),
+                          title: Text(
+                            receiverName,
+                            style: GoogleFonts.outfit(color: Colors.white),
+                          ),
+                          trailing: const Icon(Icons.chevron_right, color: Colors.white38),
+                          onTap: receiverId.isEmpty ? null : () => Navigator.of(context).pop(row),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+
+      if (chosen == null) return;
+      final receiverId = chosen['id']?.toString() ?? '';
+      final receiverName = _displayName(chosen);
+      if (receiverId.isEmpty) return;
+
+      await _supabase.from('messages').insert({
+        'sender_id': myId,
+        'receiver_id': receiverId,
+        'content': 'mix{$mixId}',
+      });
+      await _appendSharedUserToMixtape(mixtapeId: mixId, receiverId: receiverId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Shared with $receiverName', style: GoogleFonts.outfit()),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not share mix right now.', style: GoogleFonts.outfit())),
+      );
+    } finally {
+      if (mounted) setState(() => _sharing = false);
     }
   }
 
@@ -273,7 +441,10 @@ class _MixesScreenState extends State<MixesScreen> {
                 ? Image.network(coverArtUrl, fit: BoxFit.cover)
                 : Container(
                     color: Colors.blueAccent.withAlpha(45),
-                    child: const Icon(Icons.queue_music_rounded, color: Colors.white70),
+                    child: const Icon(
+                      Icons.queue_music_rounded,
+                      color: Colors.white70,
+                    ),
                   ),
           ),
         ),
@@ -296,10 +467,7 @@ class _MixesScreenState extends State<MixesScreen> {
                   : '$description · $trackCount tracks',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.outfit(
-                color: Colors.white70,
-                fontSize: 12,
-              ),
+              style: GoogleFonts.outfit(color: Colors.white70, fontSize: 12),
             ),
             const SizedBox(height: 6),
             if (sharedByLabel != null)
@@ -334,10 +502,20 @@ class _MixesScreenState extends State<MixesScreen> {
           ],
         ),
         trailing: canDelete
-            ? IconButton(
-                icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
-                tooltip: 'Delete mixtape',
-                onPressed: () => _confirmAndDeleteMix(mix),
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.share_outlined, color: Colors.white70),
+                    tooltip: 'Share mixtape',
+                    onPressed: _sharing ? null : () => _shareMix(mix),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
+                    tooltip: 'Delete mixtape',
+                    onPressed: () => _confirmAndDeleteMix(mix),
+                  ),
+                ],
               )
             : const Icon(Icons.chevron_right_rounded, color: Colors.white54),
         onTap: () {
@@ -400,10 +578,7 @@ class _MixesScreenState extends State<MixesScreen> {
             ),
             child: Text(
               emptyMessage,
-              style: GoogleFonts.outfit(
-                color: Colors.white54,
-                fontSize: 13,
-              ),
+              style: GoogleFonts.outfit(color: Colors.white54, fontSize: 13),
             ),
           )
         else

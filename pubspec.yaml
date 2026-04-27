@@ -39,6 +39,9 @@ dependencies:
   google_fonts: ^8.0.2
   supabase_flutter: ^2.12.0
   flutter_dotenv: ^5.2.1
+  just_waveform: ^0.0.7
+  path_provider: ^2.1.5
+  http: ^1.6.0
 
 dev_dependencies:
   flutter_test:
