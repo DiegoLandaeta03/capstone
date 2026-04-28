@@ -1,43 +1,69 @@
-name: Docs
+name: Docs (GitHub Pages)
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
 
-      - name: Install dependencies
-        working-directory: Mixd
-        run: flutter pub get
+      - name: Generate API docs (dartdoc)
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Generate API docs
-        working-directory: Mixd
-        run: dart doc .
+          # Support either repo layouts:
+          # - Flutter project at repo root: ./pubspec.yaml
+          # - Flutter project nested:      ./Mixd/pubspec.yaml
+          if [[ -f "pubspec.yaml" ]]; then
+            PROJECT_DIR="."
+          elif [[ -f "Mixd/pubspec.yaml" ]]; then
+            PROJECT_DIR="Mixd"
+          else
+            echo "Could not find pubspec.yaml at repo root or ./Mixd/"
+            exit 1
+          fi
 
-      - name: Upload artifact
+          pushd "$PROJECT_DIR" >/dev/null
+          flutter pub get
+
+          # Always write docs to a fixed path at repo root for Pages upload.
+          dart doc --output "$GITHUB_WORKSPACE/site"
+          popd >/dev/null
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # This points to the folder created by dart doc
-          path: Mixd/doc/api/
+          path: site
 
   deploy:
     needs: build
-    permissions:
-      pages: write
-      id-token: write
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
