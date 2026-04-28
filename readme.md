@@ -61,6 +61,11 @@ A social music platform for creating and sharing custom mixtapes. Built with Flu
 - Android Studio or Xcode (for emulators)
 - A connected device or emulator
 
+## Documentation
+
+- **Team docs**: see `docs/` (architecture, development notes)
+- **API docs (auto-generated)**: generated via `dart doc` and deployed via GitHub Pages (see `.github/workflows/docs.yml`)
+
 ### Run the App
 
 ```bash
